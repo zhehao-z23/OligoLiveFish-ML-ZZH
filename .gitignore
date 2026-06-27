@@ -1,0 +1,13 @@
+pipeline/README_v2.md pipeline/pipeline_README.md pipeline/pipeline_README_v3.md pipeline/run_full_pipeline_v2.12.py pipeline/run_pipeline_v2.py
+
+data/
+trajectory_to_nuclear_features/data/
+trajectory_to_nuclear_features/*.zip
+trajectory_to_nuclear_features/outputs/
+
+exampe_data/
+
+farmshare/jobs/
+farmshare/logs/
+
+**/__pycache__/
