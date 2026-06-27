@@ -1,6 +1,6 @@
 # Feature Extraction
 
-Extracts spatial and morphological features from nuclear segmentation masks and tracked locus trajectories.
+Extracts spatial and morphological features from nuclear segmentation masks and the location of DNA locus.
 
 ## Scripts
 
