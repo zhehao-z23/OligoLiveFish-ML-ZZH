@@ -82,7 +82,15 @@ R_loci{N}_traj_m2DGaussian_cleaned.csv
 Each trajectory CSV contains `frame`, `x_nm`, and `y_nm` columns in whole-image
 coordinates.
 
-## Stage 3: Trajectory-To-Feature Modeling
+## Stage 3: Cellular Feature Extraction
+
+Extracts spatial and morphological features from nuclear segmentation masks and the location of DNA locus.
+
+```bash
+python3 extract_features.py /path/to/nucleus_folder [--pixel-size 108.33]
+```
+
+## Stage 4: Trajectory-To-Feature Modeling
 
 The modeling workflows ask whether chromatin motion encodes information about
 nuclear morphology, local chromatin density, and locus spatial context.
