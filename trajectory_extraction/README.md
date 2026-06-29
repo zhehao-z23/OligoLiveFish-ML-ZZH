@@ -1,4 +1,4 @@
-# OligoLIVEFISH Analysis Pipeline — v3
+# CrispTrack (CRISPR-mediated Chromatin Dynamics Tracking)
 
 Automated reference trajectory extraction and single-particle tracking (SPT) pipeline for live-cell oligoLiveFISH imaging. Tracks DNA loci labelled with green (reference), red, and purple fluorophores across multi-timeframe time-lapse acquisitions.
 
