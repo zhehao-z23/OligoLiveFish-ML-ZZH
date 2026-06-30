@@ -39,7 +39,7 @@ override it by setting `DATA_ROOT` to another directory with the same structure.
 
 ```text
 data/
-  chr3/
+  modeling/
     engineered_feature_table.csv
     locus_feature_table.csv
     nucleus_feature_table.csv
@@ -47,6 +47,9 @@ data/
       grouped_model_comparison.csv
       best_model_by_target.csv
       heldout_test_nuclei.csv
+    deep_learning_7target_results/
+      dl_extended_raw_results.csv
+      dl_final_comprehensive_results.csv
   trajectories/
     batch1/
       Nuc_number_mapping.csv
