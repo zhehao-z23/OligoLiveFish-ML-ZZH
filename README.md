@@ -32,7 +32,8 @@ nucleus_segmentation/
 
 trajectory_extraction/
   run_full_pipeline_v3.py  # production trajectory-extraction entry point
-  internal/                # runtime helper scripts and MATLAB dependencies
+  pipeline/                # scripts and MATLAB dependencies
+  example_data/            # example cropped imaging data for trajectory extraction
 
 Cellular_feature_extraction/
   extract_features.py      # Core feature extractor from images of nucleus
