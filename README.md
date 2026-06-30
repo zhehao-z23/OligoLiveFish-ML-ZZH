@@ -10,7 +10,7 @@ The repository is organized around four stages:
 1. `nucleus_segmentation/` segments nuclei in `.nd2` field-of-view files and
    exports one single-nucleus TIFF per crop.
 2. `trajectory_extraction/` runs the single-nucleus DNA locus trajectory extraction
-   workflow **CrispTrack** (CRISPR-mediated Chromatin Dynamics Tracking): Fiji preprocessing, reference trajectory detection, MATLAB 2D
+   workflow **CrisprTrack** (CRISPR-mediated Chromatin Dynamics Tracking): Fiji preprocessing, reference trajectory detection, MATLAB 2D
    Gaussian fitting, and reference-based filtering of real DNA signals in each
    fluorescence channel.
 3. `Cellular_feature_extraction/` extracts the cellular and nuclear features from single-nucleus TIFF files.
