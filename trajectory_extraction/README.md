@@ -42,7 +42,7 @@ No other path configuration is needed. All MATLAB `.m` dependencies are bundled 
 The pipeline has three stages:
 
 ```
-Stage 1  auto_roi_for_published_v2.12.py
+Stage 1  auto_roi_for_published_v2.13.py
          ↳ Detects green loci, tracks green/purple/red reference trajectories,
            saves per-locus reference CSVs.
 
@@ -104,7 +104,7 @@ All TIFFs must carry ImageJ-format metadata with `finterval` (frame interval in 
 
 | Script | Role |
 |--------|------|
-| `auto_roi_for_published_v2.12.py` | Stage 1 — reference trajectory extraction |
+| `auto_roi_for_published_v2.13.py` | Stage 1 — reference trajectory extraction |
 | `run_pipeline_v3.py` | Stage 2 — MATLAB SPT + CSV export (uses bundled `matlab_deps/`) |
 | `match_m2DGaussian_to_reference.py` | Stage 3 — trajectory matching and final output |
 | `run_full_pipeline_v3.py` | Runs all three stages sequentially for one dataset |
@@ -131,7 +131,7 @@ A log file `log_trajectory_v3.txt` is written to the analysis directory.
 
 ## Parameters
 
-All tunable parameters are at the top of `auto_roi_for_published_v2.12.py`.
+All tunable parameters are at the top of `auto_roi_for_published_v2.13.py`.
 
 ### Detection thresholds
 
