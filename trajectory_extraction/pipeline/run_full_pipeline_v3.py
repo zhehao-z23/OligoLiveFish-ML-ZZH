@@ -6,7 +6,7 @@ Standalone version: all MATLAB dependencies are bundled in matlab_deps/ next to
 this script. No external SPT installation or hardcoded paths required.
 
 Steps:
-  1. auto_roi_for_published_v2.12.py — detect green loci, output reference trajectories
+  1. auto_roi_for_published_v2.13.py — detect green loci, output reference trajectories
                                        (joint seeding for overlapping ROIs)
   2. run_pipeline_v3.py              — run MATLAB SPT using bundled matlab_deps/
   3. match_m2DGaussian_to_reference.py — match MATLAB tracks to reference tracks
@@ -25,7 +25,7 @@ from pathlib import Path
 
 HERE = Path(__file__).parent.resolve()
 
-V212_SCRIPT  = HERE / 'auto_roi_for_published_v2.12.py'
+V212_SCRIPT  = HERE / 'auto_roi_for_published_v2.13.py'
 SPT_SCRIPT   = HERE / 'run_pipeline_v3.py'
 MATCH_SCRIPT = HERE / 'match_m2DGaussian_to_reference.py'
 
