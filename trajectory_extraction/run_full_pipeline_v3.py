@@ -29,7 +29,7 @@ from pathlib import Path
 HERE = Path(__file__).parent.resolve()
 INTERNAL = HERE / 'internal'
 
-V212_SCRIPT  = INTERNAL / 'auto_roi_for_published_v2.12.py'
+V212_SCRIPT  = INTERNAL / 'auto_roi_for_published_v2.13.py'
 SPT_SCRIPT   = INTERNAL / 'run_pipeline_v3.py'
 MATCH_SCRIPT = INTERNAL / 'match_m2DGaussian_to_reference.py'
 FIJI_MACRO   = INTERNAL / 'headless_Macro_first_steps_for_published.ijm'
