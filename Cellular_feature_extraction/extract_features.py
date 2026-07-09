@@ -38,13 +38,79 @@ from scipy import ndimage
 # ║  PARAMETERS                                                                 ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
-PIXEL_SIZE_NM = 183.3        # nm per pixel (from ND2 metadata: 5.4545 px/µm)
 LOCAL_WINDOW  = 11           # side length (px) for local chromatin intensity sampling
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║  UTILITIES                                                                  ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
+
+def read_pixel_size_nm_from_tif(path: Path) -> float:
+    """
+    Read XResolution from TIFF metadata and return nanometres per pixel.
+
+    Checks ImageJ ImageDescription (tag 270) for a unit= annotation first,
+    then falls back to the TIFF ResolutionUnit tag (296).  XResolution (282)
+    gives pixels per unit; the returned value is nm/px.
+
+    Raises ValueError if the pixel size cannot be determined.
+    """
+    from PIL import Image
+    img = Image.open(str(path))
+    tags = getattr(img, 'tag_v2', {})
+
+    x_res_raw = tags.get(282)
+    if x_res_raw is None:
+        raise ValueError(f"No XResolution tag in {path.name}")
+    if hasattr(x_res_raw, '__float__'):
+        x_res = float(x_res_raw)
+    elif isinstance(x_res_raw, (list, tuple)):
+        val = x_res_raw[0]
+        x_res = float(val) if hasattr(val, '__float__') else float(val[0]) / float(val[1])
+    else:
+        x_res = float(x_res_raw)
+    if x_res == 0.0:
+        raise ValueError(f"XResolution is zero in {path.name}")
+
+    res_unit_raw = tags.get(296, 2)
+    res_unit = int(res_unit_raw[0]) if isinstance(res_unit_raw, (list, tuple)) else int(res_unit_raw)
+
+    img_desc_raw = tags.get(270, '')
+    if isinstance(img_desc_raw, bytes):
+        img_desc = img_desc_raw.decode('latin-1', errors='replace')
+    elif isinstance(img_desc_raw, (list, tuple)):
+        img_desc = str(img_desc_raw[0]) if img_desc_raw else ''
+    else:
+        img_desc = str(img_desc_raw)
+
+    ij_unit = None
+    for line in img_desc.replace('\r\n', '\n').replace('\r', '\n').split('\n'):
+        if line.strip().lower().startswith('unit='):
+            ij_unit = line.strip().split('=', 1)[1].strip().lower()
+            break
+
+    _UM = {'micron', 'microns', 'um', 'µm', 'μm', 'micrometer', 'micrometers',
+           'micrometre', 'micrometres'}
+    _NM = {'nm', 'nanometer', 'nanometers', 'nanometre', 'nanometres'}
+    _CM = {'cm', 'centimeter', 'centimeters', 'centimetre', 'centimetres'}
+
+    if ij_unit in _UM:
+        px_per_um = x_res
+    elif ij_unit in _NM:
+        px_per_um = x_res / 1000.0
+    elif ij_unit in _CM or res_unit == 3:
+        px_per_um = x_res / 1e4
+    elif res_unit == 2:
+        px_per_um = x_res / 25400.0
+    elif res_unit == 1:
+        px_per_um = x_res
+    else:
+        raise ValueError(
+            f"Cannot determine pixel unit for {path.name}: "
+            f"ResolutionUnit={res_unit}, ImageJ unit='{ij_unit}'")
+
+    return 1000.0 / px_per_um
+
 
 def load_tiff_stack(path: Path) -> np.ndarray:
     """Load a multi-frame TIFF as float32 array (frames, H, W)."""
@@ -470,14 +536,13 @@ def main():
     )
     parser.add_argument("output_dir",
                         help="Path to the output folder from the imaging pipeline")
-    parser.add_argument("--pixel-size", type=float, default=PIXEL_SIZE_NM,
-                        help=f"Pixel size in nm (default: {PIXEL_SIZE_NM})")
+    parser.add_argument("--pixel-size", type=float, default=None,
+                        help="Pixel size in nm/px (overrides metadata; default: read from *_Nucleus.tif)")
     parser.add_argument("--local-window", type=int, default=LOCAL_WINDOW,
                         help=f"Window size for local chromatin sampling (default: {LOCAL_WINDOW})")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir).resolve()
-    pixel_size = args.pixel_size
     local_window = args.local_window
 
     if not output_dir.is_dir():
@@ -485,7 +550,6 @@ def main():
         sys.exit(1)
 
     print(f"Output dir  : {output_dir}")
-    print(f"Pixel size  : {pixel_size} nm/px")
 
     # ── Discover files ─────────────────────────────────────────────────────────
     masks_path = output_dir / 'Nucleus_masks.tif'
@@ -504,6 +568,24 @@ def main():
     print(f"Green ch    : {green_ch_path.name if green_ch_path else 'NOT FOUND'}")
     print(f"ROIs        : {len(rois)} found  {[r['name'] for r in rois]}")
     print(f"Trajectories: {len(traj_csvs)} found  {list(traj_csvs.keys())}")
+
+    # ── Pixel size ─────────────────────────────────────────────────────────────
+    if args.pixel_size is not None:
+        pixel_size = args.pixel_size
+        print(f"Pixel size  : {pixel_size} nm/px (CLI override)")
+    else:
+        ref_tif = nucleus_ch_path or green_ch_path
+        if ref_tif is None:
+            print("ERROR: no *_Nucleus.tif or *_green.tif found to read pixel size from. "
+                  "Pass --pixel-size manually.")
+            sys.exit(1)
+        try:
+            pixel_size = read_pixel_size_nm_from_tif(ref_tif)
+        except ValueError as e:
+            print(f"ERROR reading pixel size from metadata: {e}")
+            print("  Pass --pixel-size manually to override.")
+            sys.exit(1)
+        print(f"Pixel size  : {pixel_size:.4f} nm/px (from {ref_tif.name})")
 
     if not rois and not traj_csvs:
         print("\nERROR: No ROI files or trajectory CSVs found.")

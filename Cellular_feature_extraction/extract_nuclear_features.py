@@ -30,9 +30,6 @@ from scipy import ndimage
 # PARAMETERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-PIXEL_SIZE_NM = 183.3  # nm per pixel (from ND2 metadata)
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # MASK LOADING
 # ══════════════════════════════════════════════════════════════════════════════
@@ -62,11 +59,80 @@ def load_mask_frames(path: Path) -> list:
     return frames
 
 
+def read_pixel_size_nm_from_tif(path: Path):
+    """
+    Try to read pixel size in nm/px from TIFF metadata (XResolution tag).
+
+    Priority for unit interpretation:
+      1. ImageJ ImageDescription unit= annotation
+      2. TIFF ResolutionUnit tag
+
+    Returns float (nm/px) on success, or None if the metadata is absent or
+    cannot be interpreted (e.g. mask TIFs saved without physical units).
+    """
+    try:
+        from PIL import Image
+        img = Image.open(str(path))
+        tags = getattr(img, 'tag_v2', {})
+
+        x_res_raw = tags.get(282)
+        if x_res_raw is None:
+            return None
+        if hasattr(x_res_raw, '__float__'):
+            x_res = float(x_res_raw)
+        elif isinstance(x_res_raw, (list, tuple)):
+            val = x_res_raw[0]
+            x_res = float(val) if hasattr(val, '__float__') else float(val[0]) / float(val[1])
+        else:
+            x_res = float(x_res_raw)
+        if x_res == 0.0:
+            return None
+
+        res_unit_raw = tags.get(296, 2)
+        res_unit = int(res_unit_raw[0]) if isinstance(res_unit_raw, (list, tuple)) else int(res_unit_raw)
+
+        img_desc_raw = tags.get(270, '')
+        if isinstance(img_desc_raw, bytes):
+            img_desc = img_desc_raw.decode('latin-1', errors='replace')
+        elif isinstance(img_desc_raw, (list, tuple)):
+            img_desc = str(img_desc_raw[0]) if img_desc_raw else ''
+        else:
+            img_desc = str(img_desc_raw)
+
+        ij_unit = None
+        for line in img_desc.replace('\r\n', '\n').replace('\r', '\n').split('\n'):
+            if line.strip().lower().startswith('unit='):
+                ij_unit = line.strip().split('=', 1)[1].strip().lower()
+                break
+
+        _UM = {'micron', 'microns', 'um', 'µm', 'μm', 'micrometer', 'micrometers',
+               'micrometre', 'micrometres'}
+        _NM = {'nm', 'nanometer', 'nanometers', 'nanometre', 'nanometres'}
+        _CM = {'cm', 'centimeter', 'centimeters', 'centimetre', 'centimetres'}
+
+        if ij_unit in _UM:
+            px_per_um = x_res
+        elif ij_unit in _NM:
+            px_per_um = x_res / 1000.0
+        elif ij_unit in _CM or res_unit == 3:
+            px_per_um = x_res / 1e4
+        elif res_unit == 2:
+            px_per_um = x_res / 25400.0
+        elif res_unit == 1:
+            px_per_um = x_res
+        else:
+            return None
+
+        return 1000.0 / px_per_um
+    except Exception:
+        return None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # NUCLEUS MORPHOLOGY (reused from extract_features.py)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def extract_nucleus_morphology(mask: np.ndarray, pixel_size_nm: float = PIXEL_SIZE_NM) -> dict:
+def extract_nucleus_morphology(mask: np.ndarray, pixel_size_nm: float) -> dict:
     """
     Extract morphological features from a single binary nucleus mask.
     """
@@ -211,8 +277,8 @@ def main():
                         help='Root folder containing "all nd2 files" subfolders')
     parser.add_argument('--output-dir', type=str, default='.',
                         help='Directory for output CSVs (default: current dir)')
-    parser.add_argument('--pixel-size', type=float, default=PIXEL_SIZE_NM,
-                        help=f'Pixel size in nm (default: {PIXEL_SIZE_NM})')
+    parser.add_argument('--pixel-size', type=float, default=None,
+                        help='Pixel size in nm/px (last-resort fallback; default: read from mask TIF or JSON metadata)')
     args = parser.parse_args()
 
     data_root = Path(args.data_root).resolve()
@@ -221,7 +287,7 @@ def main():
 
     print(f"Data root  : {data_root}")
     print(f"Output dir : {output_dir}")
-    print(f"Pixel size : {pixel_size} nm/px")
+    print(f"Pixel size : {'per-file from TIF/JSON metadata' if pixel_size is None else f'{pixel_size} nm/px (CLI fallback)'}")
 
     # ── Discover masks ─────────────────────────────────────────────────────
     print("\nDiscovering mask files...")
@@ -262,9 +328,20 @@ def main():
         n_timepoints = time_info.get('n_frames', None)
         frame_interval = time_info.get('finterval_s', None)
 
-        # Use metadata pixel size if available, otherwise default
-        px_meta = meta.get('pixel_size', {})
-        px_size = px_meta.get('x_um', pixel_size / 1000) * 1000  # convert um -> nm
+        # Pixel size lookup: mask TIF metadata → JSON pixel_size.x_um → CLI --pixel-size
+        px_size = read_pixel_size_nm_from_tif(mask_path)
+        if px_size is None:
+            x_um = meta.get('pixel_size', {}).get('x_um')
+            if x_um is not None:
+                px_size = x_um * 1000  # µm → nm
+        if px_size is None:
+            if pixel_size is not None:
+                px_size = pixel_size
+            else:
+                print(f"  SKIP {nucleus_id}: pixel size unknown "
+                      f"(no TIF metadata, no JSON pixel_size, no --pixel-size)")
+                n_failed += 1
+                continue
 
         # Load mask frames
         try:
