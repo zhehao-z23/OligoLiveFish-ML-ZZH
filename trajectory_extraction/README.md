@@ -4,19 +4,30 @@ Automated reference trajectory extraction and single-particle tracking (SPT) pip
 
 ## Quick Start
 
+For the canonical ND2-to-cleaned-trajectory tutorial, Windows paths, batch
+parallelism, metadata-scale checks, recovery options, and troubleshooting, see
+[`../README.md`](../README.md). For already-separated TIFF inputs, see
+[`../README_tif_to_traj.md`](../README_tif_to_traj.md).
+
+Production entry points live directly in `trajectory_extraction/`; implementation
+stages and MATLAB dependencies live in `pipeline/`. Dataset-specific
+trial scripts, validation records, and generated figures should be stored in a
+separate dated trial directory beside this repository, not in the repository.
+
 ```bash
 # 1. Clone the repo
 git clone https://github.com/QilabGitHub/Oligo-LiveFish-ML.git
 cd Oligo-LiveFish-ML/trajectory_extraction/pipeline
 
-# 2. Install Python dependencies
-pip install -r requirements.txt
+# 2. Install the TIFF-to-trajectory-only Python dependencies
+pip install -r requirements_tif_to_traj.txt
 
 # 3. Add MATLAB binary to PATH (add to ~/.zshrc to make permanent)
 export PATH="/Applications/MATLAB_R20XXx.app/bin:$PATH"
 
-# 4. Run (can use any of the try_analysis/ folder in example_data/)
-python3 run_full_pipeline_v3.py /path/to/try_analysis
+# 4. Run from the repository root on an already-preprocessed analysis folder
+python3 trajectory_extraction/run_full_pipeline_v3.py --no-fiji \
+  --matlab-workers 1 /path/to/analysis
 ```
 
 No other path configuration is needed. All MATLAB `.m` dependencies are bundled in `matlab_deps/` and added to MATLAB's path automatically by the script.
@@ -47,7 +58,8 @@ Stage 1  auto_roi_for_published_v2.13.py
            saves per-locus reference CSVs.
 
 Stage 2  run_pipeline_v3.py
-         ↳ Calls MATLAB spt_batch.m on each channel TIFF → .mat files,
+         ↳ Reuses one MATLAB session by default (or optional parallel processes)
+           for all channel TIFFs → .mat files,
            then exports every MATLAB trajectory to CSV.
 
 Stage 3  match_m2DGaussian_to_reference.py
@@ -63,16 +75,10 @@ The full pipeline (all three stages) is orchestrated by `run_full_pipeline_v3.py
 
 ### Python packages
 
-```
-Pillow==12.1.0
-numpy==2.4.2
-scipy==1.17.1
-```
-
-Install with:
+Install the maintained, pinned TIFF-only environment from the repository root:
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements_tif_to_traj.txt
 ```
 
 All other imports (`csv`, `math`, `pathlib`, `subprocess`, `struct`, `zipfile`, `re`, `collections`, `datetime`) are Python standard library.
@@ -107,7 +113,9 @@ All TIFFs must carry ImageJ-format metadata with `finterval` (frame interval in 
 | `auto_roi_for_published_v2.13.py` | Stage 1 — reference trajectory extraction |
 | `run_pipeline_v3.py` | Stage 2 — MATLAB SPT + CSV export (uses bundled `matlab_deps/`) |
 | `match_m2DGaussian_to_reference.py` | Stage 3 — trajectory matching and final output |
-| `run_full_pipeline_v3.py` | Runs all three stages sequentially for one dataset |
+| `../run_full_pipeline_v3.py` | Production entry: optional Fiji plus all three trajectory stages for one cell |
+| `../run_batch_pipeline_v3.py` | Production multi-cell wrapper with resume, validation, and bounded parallelism |
+| `run_full_pipeline_v3.py` | Internal entry for an already-preprocessed analysis directory |
 
 ---
 
@@ -116,16 +124,23 @@ All TIFFs must carry ImageJ-format metadata with `finterval` (frame interval in 
 ### Single dataset
 
 ```bash
-python3 run_full_pipeline_v3.py "<path_to_analysis_dir>"
+ANALYSIS_DIR="/path/to/analysis" # REPLACE: preprocessed folder containing the four channel TIFFs
+python3 trajectory_extraction/run_full_pipeline_v3.py --no-fiji \
+  --matlab-workers 1 "$ANALYSIS_DIR"
 ```
 
 Example:
 
 ```bash
-python3 run_full_pipeline_v3.py "example_data/try_analysis1"
+python3 trajectory_extraction/run_full_pipeline_v3.py --no-fiji \
+  --matlab-workers 1 "trajectory_extraction/example_data/try_analysis1"
 ```
 
-A log file `log_trajectory_v3.txt` is written to the analysis directory.
+A log file `log_trajectory_v3.txt` and reproducibility/resume file
+`trajectory_run_manifest.json` are written to the analysis directory. Use
+`--matlab-workers 2` or `3` only after benchmarking CPU, memory, disk bandwidth,
+and license capacity. The default `1` still avoids three separate MATLAB
+startups by handling all channels in one session.
 
 ---
 
@@ -161,7 +176,7 @@ All tunable parameters are at the top of `auto_roi_for_published_v2.13.py`.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `PIXEL_SIZE_UM` | `5.45` | Pixel size in px/µm (read from TIFF metadata; used to convert nm ↔ px) |
+| `PIXEL_SIZE_UM` | metadata-derived | Historical variable name; runtime value is px/µm from TIFF metadata and must not be hard-coded. |
 | `INTER_FRAME_MAX_NM` | `500` | Maximum frame-to-frame displacement (nm) for purple tracking, assuming any DNA loci move a limited step per frame |
 | `INTER_FRAME_MAX_NM_RED` | `750` | Maximum frame-to-frame displacement (nm) for red tracking (relaxed; red loci are more mobile) |
 | `GREEN_PROX_MAX_UM` | `3.0` | Maximum distance (µm) from the green locus for a purple/red candidate to be accepted; assuming any purple or red loci will not be too far from green loci |
@@ -208,6 +223,7 @@ These parameters are set inside `spt_batch.m`. Two are read from TIFF metadata; 
 | `estD` | `0.001` | Estimated diffusion constant (µm²/s), used only to compute `max_disp` |
 | `fitmethod` | `0` | Fitting method: 0 = 2D Gaussian, 1 = centroid |
 | `IntTh` | `0` | Integrated intensity threshold (disabled) |
+| `saveFilterImgMode` | `0` | Filtered movies are removed before MAT save because CSV export does not read them. `--matlab-save-filter-images` changes this to `1`. |
 
 ### Matching (Stage 3)
 

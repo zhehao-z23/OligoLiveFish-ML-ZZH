@@ -11,3 +11,4 @@ farmshare/jobs/
 farmshare/logs/
 
 **/__pycache__/
+.venv*/

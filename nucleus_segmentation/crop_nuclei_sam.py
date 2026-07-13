@@ -2,20 +2,17 @@
 crop_nuclei_sam.py — LiveFISH nucleus auto-cropping via µSAM (vit_b_lm, APG mode)
 
 Usage:
-    conda run -n base python "code (being modified)/crop_nuclei_sam.py" \
-        "data for analysis/FOV (.nd2 files)" \
+    python nucleus_segmentation/crop_nuclei_sam.py INPUT_ND2_OR_DIRECTORY \
         --nucleus-channel 0 --margin 30 \
         --min-area 1000 --max-area 200000 \
-        --segmentation-mode apg --model-type vit_b_lm
-
-    # Single file:
-    conda run -n base python "code (being modified)/crop_nuclei_sam.py" \
-        "data for analysis/FOV (.nd2 files)/....nd2" ...
+        --segmentation-mode apg --model-type vit_b_lm --device auto
 """
 
 import argparse
+import csv
 import json
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 
@@ -24,11 +21,58 @@ matplotlib.use("Agg")  # matplotlib will not plot to the screen, only to the fil
 import matplotlib.pyplot as plt
 import numpy as np
 from nd2 import ND2File
-from scipy.ndimage import binary_dilation, distance_transform_edt, gaussian_filter # pre and post processing of masks
+import dask.array as da
+from scipy.ndimage import binary_dilation, binary_erosion, distance_transform_edt, gaussian_filter # pre and post processing of masks
 from skimage.feature import peak_local_max # peak detection for watershed split
 from skimage.measure import regionprops # region properties for mask filtering
 from skimage.segmentation import watershed # watershed segmentation for mask (adjacent nuclei) splitting
 import tifffile
+
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+def resolve_device(device_arg: str) -> str:
+    """Resolve auto/cuda/mps/cpu into a torch device string for this machine."""
+    import torch
+
+    if device_arg == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "--device cuda was requested, but this PyTorch installation cannot "
+                "access CUDA. Use --device cpu, or install a CUDA-enabled PyTorch "
+                "build that matches the NVIDIA driver."
+            )
+        return "cuda"
+    if device_arg == "mps":
+        mps = getattr(torch.backends, "mps", None)
+        if mps is None or not mps.is_available():
+            raise RuntimeError("--device mps was requested, but MPS is not available.")
+        return "mps"
+    if device_arg == "cpu":
+        return "cpu"
+
+    if torch.cuda.is_available():
+        return "cuda"
+
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        return "mps"
+
+    return "cpu"
+
+
+def describe_device(device: str) -> str:
+    """Return a concise, auditable description of the selected backend."""
+    if device != "cuda":
+        return device
+    import torch
+
+    index = torch.cuda.current_device()
+    total_gib = torch.cuda.get_device_properties(index).total_memory / (1024 ** 3)
+    return f"cuda:{index} ({torch.cuda.get_device_name(index)}, {total_gib:.1f} GiB)"
 
 # ── constants ──────────────────────────────────────────────────────────────────
 DEFAULT_BORDER_MARGIN_PX = 5 # minimum distance from the border of the image to the nucleus center
@@ -40,6 +84,8 @@ MERGE_MIN_SOLID  = 0.60 # minimum solidity of the nucleus to not be passed to me
 MIN_CIRC         = 0.3 # minimum circularity 4*pi*area/perimeter^2 of the nucleus to not be passed to merging (by raising this, we allow more elongated nuclei to be passed to merging)
 IOU_THRESH       = 0.3 # maximum allowed overlap between nuclei to be considered as part of the same nucleus and discarded since it's redundant
 CONTAIN_THRESH   = 0.5 # minimum containment of the nucleus to not be passed to merging (raising this allows more elongated nuclei to be passed to merging)
+BAD_QC_CH0_CONTRAST_MAX = 0.085
+BAD_QC_CH0_BOUNDARY_GRAD_MAX = 1.70
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -75,9 +121,43 @@ def load_fov(path: Path) -> np.ndarray:
 
     target = ['T', 'Z', 'C', 'Y', 'X']
     order = [axes.index(a) for a in target]
-    arr = np.transpose(arr, order).astype(np.uint16)
+    arr = np.transpose(arr, order).astype(np.uint16, copy=False)
     print(f"  Final shape TZCYX: {arr.shape}")
     return arr
+
+
+def load_nucleus_average(path: Path, nucleus_channel: int):
+    """Load only the projected channel needed for segmentation."""
+    with ND2File(path) as f:
+        arr = f.to_dask()
+        keys = list(f.sizes.keys())
+
+        axes = [k.upper() for k in keys]
+        print(f"  nd2 axes string: {''.join(axes)}, raw shape: {arr.shape}")
+
+        for ax in ('T', 'Z', 'C'):
+            if ax not in axes:
+                arr = da.expand_dims(arr, axis=0)
+                axes.insert(0, ax)
+                print(f"  Reinserted size-1 '{ax}' axis (squeezed out by nd2 library)")
+
+        target = ['T', 'Z', 'C', 'Y', 'X']
+        order = [axes.index(a) for a in target]
+        arr = arr.transpose(order)
+        T, Z, C, H, W = [int(v) for v in arr.shape]
+        print(f"  Final shape TZCYX: {(T, Z, C, H, W)}")
+
+        nuc_sum = np.zeros((H, W), dtype=np.float32)
+        for t in range(T):
+            frame = (
+                arr[t, :, nucleus_channel, :, :]
+                .max(axis=0)
+                .compute()
+                .astype(np.float32, copy=False)
+            )
+            nuc_sum += frame
+        nuc_avg = nuc_sum / max(T, 1)
+    return nuc_avg, (T, Z, C, H, W)
 
 """
 norm_u8() percentile-stretches an image into the uint8 range for µSAM input.
@@ -95,6 +175,56 @@ def norm_u8(img: np.ndarray, lo_pct=1, hi_pct=99) -> np.ndarray:
         return np.zeros_like(img, dtype=np.uint8)
     clipped = np.clip(img, lo, hi)
     return ((clipped - lo) / (hi - lo) * 255).astype(np.uint8)
+
+
+def segment_2d_with_cuda_memory_guard(segment_fn, predictor, segmenter, nuc_u8, args):
+    """Run micro-SAM; on CUDA, precompute embeddings with decoder offloaded."""
+    use_guard = str(getattr(predictor, "device", "")).startswith("cuda") and hasattr(segmenter, "_decoder")
+    if not use_guard:
+        return segment_fn(
+            predictor=predictor,
+            segmenter=segmenter,
+            input_path=nuc_u8,
+            ndim=2,
+        )
+
+    import torch
+    from micro_sam import util as micro_sam_util
+
+    decoder = getattr(segmenter, "_decoder", None)
+    decoder_param = next(decoder.parameters(), None) if decoder is not None else None
+    decoder_device = decoder_param.device if decoder_param is not None else None
+
+    print("  CUDA memory guard: precomputing embeddings with APG decoder offloaded to CPU")
+    if decoder is not None:
+        decoder.to("cpu")
+    torch.cuda.empty_cache()
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="micro_sam_embeddings_") as tmp:
+            embedding_path = str(Path(tmp) / "embeddings.zarr")
+            micro_sam_util.precompute_image_embeddings(
+                predictor=predictor,
+                input_=nuc_u8,
+                save_path=embedding_path,
+                ndim=2,
+                verbose=True,
+                batch_size=1,
+            )
+            predictor.reset_image()
+            torch.cuda.empty_cache()
+            if decoder is not None and decoder_device is not None:
+                decoder.to(decoder_device)
+            return segment_fn(
+                predictor=predictor,
+                segmenter=segmenter,
+                input_path=nuc_u8,
+                embedding_path=embedding_path,
+                ndim=2,
+            )
+    finally:
+        if decoder is not None and decoder_device is not None:
+            decoder.to(decoder_device)
 
 
 """
@@ -174,6 +304,7 @@ def filter_masks(masks, img_shape, min_area, max_area, border_margin):
     H, W = img_shape 
     kept = [] # list to keep the masks
     stats = {"too_small": 0, "too_large": 0, "border": 0, # dictionary to keep the statistics
+             "mask_border": 0,
              "split_ok": 0, "split_fail_kept": 0, "split_fail_dropped": 0, # you can see what global variables might need to be changed based on the respective statistics
              "kept": 0}  
     for mask in masks:
@@ -197,7 +328,6 @@ def filter_masks(masks, img_shape, min_area, max_area, border_margin):
         if cx < border_margin or cx > W - border_margin:
             stats["border"] += 1
             continue
-
         if p.solidity < MIN_SOLIDITY: # if the solidity is too low, we attempt to split the mask
             pieces = try_split_mask(mask, min_area)
             if pieces: # if the split is successful, we keep the pieces and add the statistics
@@ -234,19 +364,33 @@ def deduplicate_masks(masks):
     areas = [m.sum() for m in masks]
     order = np.argsort(areas)[::-1]
     accepted = []
+    accepted_meta = []
     for i in order:
         m = masks[i]
+        rows, cols = np.where(m)
+        if rows.size == 0:
+            continue
+        bbox = (rows.min(), rows.max() + 1, cols.min(), cols.max() + 1)
+        area_m = int(areas[i])
         discard = False
-        for a in accepted:
-            inter = (m & a).sum()
-            union = (m | a).sum()
+        for a, area_a, bbox_a in accepted_meta:
+            r0 = max(bbox[0], bbox_a[0])
+            r1 = min(bbox[1], bbox_a[1])
+            c0 = max(bbox[2], bbox_a[2])
+            c1 = min(bbox[3], bbox_a[3])
+            if r0 >= r1 or c0 >= c1:
+                inter = 0
+            else:
+                inter = np.logical_and(m[r0:r1, c0:c1], a[r0:r1, c0:c1]).sum()
+            union = area_m + area_a - inter
             iou = inter / union if union else 0
-            containment = inter / m.sum() if m.sum() else 0  # fraction of m's pixels covered by already-accepted a
+            containment = inter / area_m if area_m else 0  # fraction of m's pixels covered by already-accepted a
             if iou > IOU_THRESH or containment > CONTAIN_THRESH:
                 discard = True  # m is a duplicate or subset of a — keep a, drop m
                 break
         if not discard:
             accepted.append(m)
+            accepted_meta.append((m, area_m, bbox))
     return accepted
 
 
@@ -318,6 +462,86 @@ def merge_adjacent_masks(masks, max_area):
     return masks, total_merges
 
 
+def filter_mask_border_after_merge(masks, img_shape, mask_border_margin):
+    """Drop masks touching the image border after fragment merging is complete."""
+    if mask_border_margin < 0:
+        return masks, 0
+
+    H, W = img_shape
+    kept = []
+    removed = 0
+    for mask in masks:
+        rows, cols = np.where(mask)
+        if rows.size == 0:
+            continue
+        mask_edge_dist = min(rows.min(), cols.min(), H - 1 - rows.max(), W - 1 - cols.max())
+        if mask_edge_dist <= mask_border_margin:
+            removed += 1
+            continue
+        kept.append(mask)
+    return kept, removed
+
+
+def compute_ch0_quality_metrics(mask, nuc_avg):
+    """Compute final channel-0 quality metrics for one candidate mask."""
+    rows, cols = np.where(mask)
+    if rows.size == 0:
+        return {
+            "ch0_median_inside": float("nan"),
+            "ch0_background_ring_median": float("nan"),
+            "ch0_contrast": float("nan"),
+            "ch0_boundary_grad": float("nan"),
+        }
+
+    H, W = nuc_avg.shape
+    pad = 8
+    r0, r1 = max(0, rows.min() - pad), min(H, rows.max() + pad + 1)
+    c0, c1 = max(0, cols.min() - pad), min(W, cols.max() + pad + 1)
+    local_img = nuc_avg[r0:r1, c0:c1].astype(np.float32, copy=False)
+    local_mask = mask[r0:r1, c0:c1]
+
+    dilated = binary_dilation(local_mask, iterations=6)
+    bg = dilated & (~local_mask)
+    if int(bg.sum()) < 25:
+        bg = ~local_mask
+
+    eroded = binary_erosion(local_mask, iterations=1, border_value=0)
+    boundary = local_mask ^ eroded
+    gy, gx = np.gradient(local_img)
+    grad_mag = np.hypot(gx, gy)
+
+    inside_med = float(np.median(local_img[local_mask])) if local_mask.any() else float("nan")
+    bg_med = float(np.median(local_img[bg])) if bg.any() else float("nan")
+    contrast = float((inside_med - bg_med) / (bg_med + 1e-6)) if np.isfinite(bg_med) else float("nan")
+    boundary_grad = float(np.median(grad_mag[boundary])) if boundary.any() else float("nan")
+    return {
+        "ch0_median_inside": inside_med,
+        "ch0_background_ring_median": bg_med,
+        "ch0_contrast": contrast,
+        "ch0_boundary_grad": boundary_grad,
+    }
+
+
+def filter_low_quality_nuclei(masks, nuc_avg):
+    """Apply the locked low-quality nucleus rule as the final ordered filter."""
+    kept = []
+    kept_metrics = []
+    removed = []
+    for mask in masks:
+        metrics = compute_ch0_quality_metrics(mask, nuc_avg)
+        bad_qc = (
+            metrics["ch0_contrast"] < BAD_QC_CH0_CONTRAST_MAX
+            and metrics["ch0_boundary_grad"] < BAD_QC_CH0_BOUNDARY_GRAD_MAX
+        )
+        metrics["bad_qc"] = bool(bad_qc)
+        if bad_qc:
+            removed.append((mask, metrics))
+        else:
+            kept.append(mask)
+            kept_metrics.append(metrics)
+    return kept, kept_metrics, removed
+
+
 """
 crop_with_suppression() crops one nucleus from the FOV and zeros all other nuclei.
 Inputs:  fov — (T, Z, C, H, W) uint16; mask — (H, W) bool target nucleus;
@@ -350,6 +574,82 @@ def crop_with_suppression(fov: np.ndarray, mask: np.ndarray,
     return crop, (r0, r1, c0, c1), suppress
 
 
+def crop_metadata_with_suppression(mask: np.ndarray, all_masks: list, margin: int, img_shape):
+    """Return bbox and suppression mask without loading the full multi-channel FOV."""
+    H, W = img_shape
+    rows, cols = np.where(mask)
+    r0 = max(0, rows.min() - margin)
+    r1 = min(H, rows.max() + margin + 1)
+    c0 = max(0, cols.min() - margin)
+    c1 = min(W, cols.max() + margin + 1)
+
+    suppress = np.zeros((H, W), dtype=bool)
+    for other in all_masks:
+        if other is mask:
+            continue
+        suppress |= other
+
+    return (r0, r1, c0, c1), suppress
+
+
+def sort_masks_spatially(masks):
+    """Return masks in a stable top-to-bottom, left-to-right cell order."""
+    keyed = []
+    for original_idx, mask in enumerate(masks):
+        props = regionprops(mask.astype(np.uint8))
+        if props:
+            cy, cx = props[0].centroid
+        else:
+            cy, cx = float("inf"), float("inf")
+        keyed.append(((cy, cx, original_idx), mask))
+    return [mask for _, mask in sorted(keyed, key=lambda item: item[0])]
+
+
+def write_cell_id_mapping(out_dir: Path, crops_info: list, image_shape: tuple[int, int]):
+    """Write the stable cell ID to crop-file index mapping used by batch tracking."""
+    H, W = image_shape
+    fields = [
+        "cell_id", "original_idx", "centroid_y", "centroid_x", "area",
+        "solidity", "circularity", "edge_dist", "mask_edge_dist",
+        "crop_h", "crop_w", "bbox_r0", "bbox_r1", "bbox_c0", "bbox_c1",
+    ]
+    mapping_path = out_dir / "cell_id_mapping.csv"
+    with mapping_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for idx, (_crop, bbox, mask, _suppress, _metrics) in enumerate(crops_info, start=1):
+            r0, r1, c0, c1 = bbox
+            props = regionprops(mask.astype(np.uint8))
+            if not props:
+                continue
+            p = props[0]
+            cy, cx = p.centroid
+            rows, cols = np.where(mask)
+            mask_edge_dist = min(
+                rows.min(), cols.min(), H - 1 - rows.max(), W - 1 - cols.max()
+            )
+            writer.writerow({
+                "cell_id": f"cell_{idx:03d}",
+                # New runs already write crops in stable spatial order, so the
+                # TIFF suffix and batch lookup index are intentionally identical.
+                "original_idx": idx,
+                "centroid_y": float(cy),
+                "centroid_x": float(cx),
+                "area": int(p.area),
+                "solidity": float(p.solidity),
+                "circularity": float(circularity(p.area, p.perimeter)),
+                "edge_dist": float(min(cy, cx, H - 1 - cy, W - 1 - cx)),
+                "mask_edge_dist": int(mask_edge_dist),
+                "crop_h": int(r1 - r0),
+                "crop_w": int(c1 - c0),
+                "bbox_r0": int(r0),
+                "bbox_r1": int(r1),
+                "bbox_c0": int(c0),
+                "bbox_c1": int(c1),
+            })
+    print(f"  Saved cell ID mapping -> {mapping_path.name}")
+
+
 # ── visualisation ──────────────────────────────────────────────────────────────
 
 """
@@ -361,16 +661,16 @@ Outputs: none (draws onto ax in place)
 def _draw_masks_numbered(ax, nuc_u8, masks, title):
     ax.imshow(nuc_u8, cmap='gray', alpha=0.5)
     cmap = matplotlib.colormaps.get_cmap('tab20').resampled(max(len(masks), 1))
+    label_overlay = np.zeros(nuc_u8.shape, dtype=np.uint16)
     for idx, m in enumerate(masks):
-        color = cmap(idx % cmap.N)[:3]  # % cmap.N wraps if more masks than colors; [:3] drops alpha
-        rgba = np.zeros((*m.shape, 4))
-        rgba[m] = [*color, 0.5]
-        ax.imshow(rgba)
+        label_overlay[m] = idx + 1
         props = regionprops(m.astype(np.uint8))
         if props:
             cy, cx = props[0].centroid
             ax.text(cx, cy, str(idx + 1), color='white',
                     fontsize=7, ha='center', va='center', fontweight='bold')
+    masked_overlay = np.ma.masked_where(label_overlay == 0, label_overlay)
+    ax.imshow(masked_overlay, cmap=cmap, alpha=0.5, interpolation='none')
     ax.set_title(title, fontsize=10)
     ax.axis('off')
 
@@ -384,6 +684,14 @@ Outputs: none (writes raw image | µSAM raw | after filter+merge | final deduped
 """
 def save_seg_overview(nuc_u8, segmentation, filtered_masks, merged_masks,
                       deduped_masks, out_path: Path):
+    stride = max(1, int(np.ceil(max(nuc_u8.shape) / 1400)))
+    if stride > 1:
+        nuc_u8 = nuc_u8[::stride, ::stride]
+        segmentation = segmentation[::stride, ::stride]
+        filtered_masks = [m[::stride, ::stride] for m in filtered_masks]
+        merged_masks = [m[::stride, ::stride] for m in merged_masks]
+        deduped_masks = [m[::stride, ::stride] for m in deduped_masks]
+
     fig, axes = plt.subplots(1, 4, figsize=(24, 6))
 
     axes[0].imshow(nuc_u8, cmap='gray')
@@ -404,14 +712,14 @@ def save_seg_overview(nuc_u8, segmentation, filtered_masks, merged_masks,
     axes[1].axis('off')
 
     _draw_masks_numbered(axes[2], nuc_u8, merged_masks,
-                         f"After filter+merge: {len(merged_masks)}")
+                         f"After ordered structural filters: {len(merged_masks)}")
     _draw_masks_numbered(axes[3], nuc_u8, deduped_masks,
-                         f"Final (deduped): {len(deduped_masks)}")
+                         f"Final after all filters: {len(deduped_masks)}")
 
     plt.tight_layout()
     fig.savefig(out_path, dpi=120, bbox_inches='tight')
     plt.close(fig)
-    print(f"  Saved segmentation overview → {out_path.name}")
+    print(f"  Saved segmentation overview -> {out_path.name}")
 
 
 """
@@ -448,7 +756,7 @@ def save_crop_grid(crops_info, nuc_u8, out_path: Path):
     plt.tight_layout()
     fig.savefig(out_path, dpi=120, bbox_inches='tight')
     plt.close(fig)
-    print(f"  Saved crop grid → {out_path.name}")
+    print(f"  Saved crop grid -> {out_path.name}")
 
 
 """
@@ -458,7 +766,7 @@ Inputs:  crops_info — list of (crop, bbox, mask, ...) tuples; fov — (T,Z,C,H
 Outputs: none (writes side-by-side raw vs suppressed nucleus-channel crops)
 """
 def save_suppression_demo(crops_info, fov, deduped_masks, out_path: Path,
-                          max_show=6):
+                          max_show=5):
     n = min(len(crops_info), max_show)
     if n == 0:
         return
@@ -486,7 +794,7 @@ def save_suppression_demo(crops_info, fov, deduped_masks, out_path: Path,
     plt.tight_layout()
     fig.savefig(out_path, dpi=120, bbox_inches='tight')
     plt.close(fig)
-    print(f"  Saved suppression demo → {out_path.name}")
+    print(f"  Saved suppression demo -> {out_path.name}")
 
 
 """
@@ -495,7 +803,7 @@ Inputs:  crops_info — list of (crop, bbox, mask, ...) tuples; out_path — PNG
          max_show — max crops to display
 Outputs: none (writes one row per crop, one column per channel, max-T projected)
 """
-def save_all_channels_demo(crops_info, out_path: Path, max_show=4):
+def save_all_channels_demo(crops_info, out_path: Path, max_show=5):
     n = min(len(crops_info), max_show)
     if n == 0:
         return
@@ -522,7 +830,7 @@ def save_all_channels_demo(crops_info, out_path: Path, max_show=4):
     plt.tight_layout()
     fig.savefig(out_path, dpi=120, bbox_inches='tight')
     plt.close(fig)
-    print(f"  Saved all-channels demo → {out_path.name}")
+    print(f"  Saved all-channels demo -> {out_path.name}")
 
 
 # ── main processing ────────────────────────────────────────────────────────────
@@ -549,67 +857,133 @@ Outputs: number of crops written (also writes JSON, mask TIFFs, and visualizatio
    for save_crops.py to consume without re-running µSAM.
 """
 def process_file(nd2_path: Path, predictor, segmenter, segment_fn, args):
-    print(f"\n── {nd2_path.name} ──")
+    print(f"\n-- {nd2_path.name} --")
 
-    fov = load_fov(nd2_path)          # (T, Z, C, Y, X)
-    T, Z, C, H, W = fov.shape
-    print(f"  Loaded: T={T} Z={Z} C={C} Y={H} X={W}")
-
-    ch_means = [fov[:, :, c].mean() for c in range(C)]
-    print(f"  Channel means: {[f'{m:.1f}' for m in ch_means]}")
+    nuc_avg, fov_shape = load_nucleus_average(nd2_path, args.nucleus_channel)
+    T, Z, C, H, W = fov_shape
+    print(f"  Loaded nucleus projection source: T={T} Z={Z} C={C} Y={H} X={W}")
 
     # Max-project Z only for segmentation input — µSAM needs 2D
     # The full Z info is preserved in fov for cropping and TIFF export
-    nuc_avg = fov[:, :, args.nucleus_channel].max(axis=1).mean(axis=0).astype(float)
     nuc_u8  = norm_u8(nuc_avg)
 
-    segmentation = segment_fn(
-        predictor=predictor,
-        segmenter=segmenter,
-        input_path=nuc_u8,
-        ndim=2,
+    segmentation = segment_2d_with_cuda_memory_guard(
+        segment_fn,
+        predictor,
+        segmenter,
+        nuc_u8,
+        args,
     )
 
     n_inst = int(segmentation.max())
-    print(f"  µSAM found {n_inst} instances")
+    print(f"  micro-SAM found {n_inst} instances")
 
     raw_masks = [segmentation == i for i in range(1, n_inst + 1)]  # label 0 is background — skip it
 
-    filtered_masks, stats = filter_masks(raw_masks, (H, W), args.min_area, args.max_area, args.border_margin)
-    print(f"  {len(filtered_masks)} masks after filter "
-          f"(small={stats['too_small']}, large={stats['too_large']}, "
-          f"border={stats['border']}, split={stats['split_ok']}, "
-          f"split_kept={stats['split_fail_kept']}, "
-          f"split_dropped={stats['split_fail_dropped']})")
+    filtered_masks, stats = filter_masks(
+        raw_masks,
+        (H, W),
+        args.min_area,
+        args.max_area,
+        args.border_margin,
+    )
 
     merged_masks, n_merges = merge_adjacent_masks(filtered_masks, args.max_area)
     if n_merges:
-        print(f"  {n_merges} fragment pair(s) merged → {len(merged_masks)} masks")
+        print(f"  {n_merges} fragment pair(s) merged -> {len(merged_masks)} masks")
+
+    merged_masks, post_merge_mask_border = filter_mask_border_after_merge(
+        merged_masks,
+        (H, W),
+        args.mask_border_margin,
+    )
+    stats["mask_border"] = post_merge_mask_border
+    print(f"  {len(filtered_masks)} masks after ordered area/centroid/split filters "
+          f"(small={stats['too_small']}, large={stats['too_large']}, "
+          f"border={stats['border']}, mask_border={stats['mask_border']}, "
+          f"split={stats['split_ok']}, "
+          f"split_kept={stats['split_fail_kept']}, "
+          f"split_dropped={stats['split_fail_dropped']})")
+    if args.mask_border_margin >= 0:
+        print(f"  {len(merged_masks)} masks after post-merge mask_border filter "
+              f"(removed={post_merge_mask_border})")
 
     deduped_masks = deduplicate_masks(merged_masks)
+    merged_masks = sort_masks_spatially(merged_masks)
+    deduped_masks = sort_masks_spatially(deduped_masks)
     print(f"  {len(deduped_masks)} masks after deduplication")
 
+    final_masks, quality_metrics, bad_qc_removed = filter_low_quality_nuclei(deduped_masks, nuc_avg)
+    final_masks = sort_masks_spatially(final_masks)
+    quality_metrics = [compute_ch0_quality_metrics(mask, nuc_avg) | {"bad_qc": False} for mask in final_masks]
+    stats["bad_qc"] = len(bad_qc_removed)
+    print(f"  {len(final_masks)} masks after final low-quality filter "
+          f"(bad_qc={stats['bad_qc']})")
+    print(f"  ordered filter summary: raw={n_inst}, small={stats['too_small']}, "
+          f"large={stats['too_large']}, centroid_border={stats['border']}, "
+          f"split_ok={stats['split_ok']}, split_fail_kept={stats['split_fail_kept']}, "
+          f"split_fail_dropped={stats['split_fail_dropped']}, merge_pairs={n_merges}, "
+          f"mask_border={stats['mask_border']}, bad_qc={stats['bad_qc']}, "
+          f"final={len(final_masks)}")
+
     stem    = nd2_path.stem
-    out_dir = nd2_path.parent / stem
+    out_dir = (Path(args.output_root) if args.output_root else nd2_path.parent) / stem
     out_dir.mkdir(exist_ok=True)
     viz_dir = out_dir / "visualizations"
     viz_dir.mkdir(exist_ok=True)
 
+    with open(out_dir / "cell_crop_quality_metrics.csv", "w", newline="", encoding="utf-8") as f:
+        fields = [
+            "cell_id", "ch0_median_inside", "ch0_background_ring_median",
+            "ch0_contrast", "ch0_boundary_grad", "bad_qc",
+        ]
+        import csv
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for idx, metrics in enumerate(quality_metrics, start=1):
+            row = dict(metrics)
+            row["cell_id"] = f"cell_{idx:03d}"
+            writer.writerow({key: row.get(key, "") for key in fields})
+
+    with open(out_dir / "filtered_bad_qc_candidates.csv", "w", newline="", encoding="utf-8") as f:
+        fields = [
+            "candidate_idx", "area", "centroid_y", "centroid_x",
+            "ch0_median_inside", "ch0_background_ring_median",
+            "ch0_contrast", "ch0_boundary_grad", "bad_qc",
+        ]
+        import csv
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for idx, (mask, metrics) in enumerate(bad_qc_removed, start=1):
+            props = regionprops(mask.astype(np.uint8))
+            row = dict(metrics)
+            row["candidate_idx"] = idx
+            if props:
+                row["area"] = int(props[0].area)
+                row["centroid_y"] = float(props[0].centroid[0])
+                row["centroid_x"] = float(props[0].centroid[1])
+            writer.writerow({key: row.get(key, "") for key in fields})
+
     save_seg_overview(nuc_u8, segmentation, filtered_masks, merged_masks,
-                      deduped_masks, viz_dir / "seg_overview.png")
+                      final_masks, viz_dir / "seg_overview.png")
 
     crops_info = []
-    for mask in deduped_masks:
-        crop, bbox, suppress = crop_with_suppression(fov, mask, deduped_masks, args.margin)
-        crops_info.append((crop, bbox, mask, suppress))
+    for mask, metrics in zip(final_masks, quality_metrics):
+        bbox, suppress = crop_metadata_with_suppression(mask, final_masks, args.margin, (H, W))
+        r0, r1, c0, c1 = bbox
+        crop = nuc_avg[r0:r1, c0:c1][np.newaxis, np.newaxis, np.newaxis, :, :]
+        crops_info.append((crop, bbox, mask, suppress, metrics))
+
+    write_cell_id_mapping(out_dir, crops_info, (H, W))
 
     save_crop_grid(crops_info, nuc_u8, viz_dir / "crop_grid.png")
-    save_suppression_demo(crops_info, fov, deduped_masks, viz_dir / "suppression_demo.png")
+    preview_fov = nuc_avg[np.newaxis, np.newaxis, np.newaxis, :, :]
+    save_suppression_demo(crops_info, preview_fov, final_masks, viz_dir / "suppression_demo.png")
     save_all_channels_demo(crops_info, viz_dir / "all_channels_demo.png")
 
     # Save bboxes + suppression masks to JSON for save_crops.py to consume
     crops_json = []
-    for idx, (crop, bbox, mask, suppress) in enumerate(crops_info, start=1):
+    for idx, (crop, bbox, mask, suppress, metrics) in enumerate(crops_info, start=1):
         r0, r1, c0, c1 = bbox
         suppress_crop = suppress[r0:r1, c0:c1]
         rows, cols = np.where(suppress_crop)  # JSON can't serialize numpy arrays; coordinate lists are compact and load-friendly
@@ -618,6 +992,11 @@ def process_file(nd2_path: Path, predictor, segmenter, segment_fn, args):
             'bbox':             [int(r0), int(r1), int(c0), int(c1)],
             'suppression_rows': rows.tolist(),
             'suppression_cols': cols.tolist(),
+            'ch0_median_inside': metrics["ch0_median_inside"],
+            'ch0_background_ring_median': metrics["ch0_background_ring_median"],
+            'ch0_contrast': metrics["ch0_contrast"],
+            'ch0_boundary_grad': metrics["ch0_boundary_grad"],
+            'bad_qc': metrics["bad_qc"],
         })
 
     json_path = out_dir / f"{stem}_crops.json"
@@ -628,16 +1007,15 @@ def process_file(nd2_path: Path, predictor, segmenter, segment_fn, args):
     # Save binary mask TIFFs — one per nucleus, cropped to bbox, (T, cropH, cropW),
     # nucleus=255 background=0, same mask repeated across T to match the
     # downstream trajectory-extraction pipeline's expected mask format
-    for idx, (crop, bbox, mask, suppress) in enumerate(crops_info, start=1):
+    for idx, (crop, bbox, mask, suppress, metrics) in enumerate(crops_info, start=1):
         r0, r1, c0, c1 = bbox
         mask_crop = mask[r0:r1, c0:c1].astype(np.uint8) * 255
-        T = crop.shape[0]
         mask_stack = np.repeat(mask_crop[np.newaxis], T, axis=0)
         tifffile.imwrite(out_dir / f"{stem}_mask_{idx}.tif", mask_stack)
-    print(f"  ✓ {len(crops_info)} nuclear masks → {out_dir}/")
+    print(f"  OK {len(crops_info)} nuclear masks -> {out_dir}/")
 
-    print(f"  ✓ {len(crops_info)} crops → {out_dir}/")
-    print(f"  ✓ Visualizations → {viz_dir}/")
+    print(f"  OK {len(crops_info)} crops -> {out_dir}/")
+    print(f"  OK Visualizations -> {viz_dir}/")
     return len(crops_info)
 
 
@@ -657,8 +1035,11 @@ def main():
     parser.add_argument("--min-area",          type=int, default=1000)
     parser.add_argument("--max-area",          type=int, default=200000)
     parser.add_argument("--border-margin",     type=int, default=DEFAULT_BORDER_MARGIN_PX, help="Min distance (px) from image border to nucleus centroid")
+    parser.add_argument("--mask-border-margin", type=int, default=-1, help="Drop masks whose pixels are <= this many px from image border; -1 disables")
     parser.add_argument("--segmentation-mode", default="apg", choices=["apg", "amg"])
     parser.add_argument("--model-type",        default="vit_b_lm")
+    parser.add_argument("--device",            default="auto", choices=["auto", "cuda", "mps", "cpu"])
+    parser.add_argument("--output-root",       default="", help="Optional output parent; defaults to the ND2 parent")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -674,18 +1055,24 @@ def main():
     for f in nd2_files:
         print(f"  {f.name}")
 
-    print(f"\nLoading µSAM model: {args.model_type}, "
-          f"mode={args.segmentation_mode}, device=mps")
+    device = resolve_device(args.device)
+    print(f"\nLoading micro-SAM model: {args.model_type}, "
+          f"mode={args.segmentation_mode}, device={describe_device(device)}")
+    if device == "cpu" and len(nd2_files) > 1:
+        print(
+            "TIP: CPU mode is supported, but directory batches are much faster on "
+            "an NVIDIA GPU. If CUDA is available, rerun with --device cuda."
+        )
     from micro_sam.automatic_segmentation import (  # deferred — µSAM has heavy import-time side effects
         get_predictor_and_segmenter,
         automatic_instance_segmentation,
     )
     predictor, segmenter = get_predictor_and_segmenter(
         model_type=args.model_type,
-        device='mps',  # hardcoded for Apple Silicon; change to 'cuda' on Linux GPU machines
+        device=device,
         segmentation_mode=args.segmentation_mode,
     )
-    print("  µSAM loaded.")
+    print("  micro-SAM loaded.")
 
     total_crops = 0
     failed = []
@@ -703,6 +1090,7 @@ def main():
           f"{total_crops} total crops.")
     if failed:
         print(f"Failed: {failed}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

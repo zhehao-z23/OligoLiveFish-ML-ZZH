@@ -6,41 +6,43 @@ This covers how to run the two scripts that make up Step 1 of the LiveFISH pipel
 Keeping the two steps separate means you can re-save TIFFs with different settings
 (e.g. different LUT mode) without re-running the slow µSAM segmentation.
 
+The canonical Windows tutorial, locked parameter table, GPU setup, stable cell
+IDs, and troubleshooting are maintained in [`../README.md`](../README.md) and
+[`../REQUIREMENTS_ND2_TO_TRAJ.md`](../REQUIREMENTS_ND2_TO_TRAJ.md). The commands
+below are a compact cross-platform reference and use the same production files.
+
 ---
 
 ## Setup
 
 ### Prerequisites
 
-- [Miniconda or Anaconda](https://docs.conda.io/en/latest/miniconda.html)
-- Python 3.10+ (3.13 confirmed working)
-- For Apple Silicon Macs: MPS acceleration is used automatically (`device='mps'`)
-- For Linux with GPU: change `device='mps'` → `device='cuda'` in `crop_nuclei_sam.py` (in `main()`, the `get_predictor_and_segmenter` call)
+- Python 3.13 (validated version)
+- The pinned packages in `requirements_nd2_to_traj.txt`
+- Optional NVIDIA CUDA or Apple MPS acceleration; CPU is supported
 
 ### Install dependencies
 
-All scripts run in a dedicated conda environment. Create one and install everything:
+Create an isolated venv from the repository root:
 
 ```bash
-conda create -n livefish python=3.13
-conda activate livefish
-pip install numpy scipy scikit-image matplotlib Pillow tifffile nd2 micro-sam
+python3.13 -m venv .venv_nd2_to_traj
+source .venv_nd2_to_traj/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements_nd2_to_traj.txt
 ```
 
-> **Note:** `micro-sam` pulls in PyTorch automatically. On Apple Silicon the MPS backend
-> is included. On Linux you may need to install a CUDA-enabled torch first —
-> see [pytorch.org](https://pytorch.org) for the right install command for your CUDA version.
-
-Once set up, all commands below use `conda run -n livefish` to invoke this environment.
-If you named your environment differently, substitute that name.
+For NVIDIA setup, use the official PyTorch selector procedure documented in
+`REQUIREMENTS_ND2_TO_TRAJ.md`; never edit the Python source to select a device.
+The CLI accepts `--device auto`, `cuda`, `mps`, or `cpu`.
 
 ### Navigate to the project folder
 
-All paths below are relative to the root of the CS273B project folder.
+All paths below are relative to this repository root.
 Open a terminal and `cd` there first:
 
 ```bash
-cd "/path/to/CS273B project"
+cd "/path/to/OligoLiveFish-ML-ZZH" # REPLACE: local repository path
 ```
 
 ### Note on Google Drive paths
@@ -60,22 +62,15 @@ Always start with one file and check the visualizations before running the full 
 Use a small or known-good file first.
 
 ```bash
-conda run -n livefish python "code (being modified)/crop_nuclei_sam.py" \
-    "data for analysis/FOV (.nd2 files)/<your_file>.nd2" \
+ND2="/path/to/<ND2_stem>.nd2"       # REPLACE: one real ND2 file
+CROP_ROOT="/path/to/cell_crops"     # REPLACE: output parent
+python nucleus_segmentation/crop_nuclei_sam.py "$ND2" \
+    --device auto \
     --nucleus-channel 0 --margin 30 \
     --min-area 1000 --max-area 200000 \
     --segmentation-mode apg --model-type vit_b_lm \
-    --border-margin 5
-```
-
-Example with the confirmed good test file:
-```bash
-conda run -n livefish python "code (being modified)/crop_nuclei_sam.py" \
-    "data for analysis/FOV (.nd2 files)/U2OS_chr3_195M-488+195.7M-565+198M-647_RNP1_H33342_Bright+Antifade_7h_0.9_4t (good).nd2" \
-    --nucleus-channel 0 --margin 30 \
-    --min-area 1000 --max-area 200000 \
-    --segmentation-mode apg --model-type vit_b_lm \
-    --border-margin 5
+    --border-margin 5 --mask-border-margin 0 \
+    --output-root "$CROP_ROOT"
 ```
 
 ### Full batch (all .nd2 files in folder)
@@ -84,19 +79,21 @@ Pass the folder instead of a single file — the script finds all `.nd2` files r
 Point at the root data folder to process everything at once:
 
 ```bash
-conda run -n livefish python "code (being modified)/crop_nuclei_sam.py" \
-    "data for analysis" \
+RAW_DIR="/path/to/raw_nd2"            # REPLACE: recursively searched input folder
+python nucleus_segmentation/crop_nuclei_sam.py "$RAW_DIR" \
+    --device cuda \
     --nucleus-channel 0 --margin 30 \
     --min-area 1000 --max-area 200000 \
-    --segmentation-mode apg --model-type vit_b_lm
+    --segmentation-mode apg --model-type vit_b_lm \
+    --border-margin 5 --mask-border-margin 0 \
+    --output-root "$CROP_ROOT"
 ```
 
 ### Nested folder structures
 
 Pointing the script at a folder will recursively find all `.nd2` files in subfolders.
-Output for each file is written next to that file in its original location, preserving
-the source folder structure. This means a top-level run over a deeply-nested data dump
-is fine — no need to flatten or pre-organize files.
+With `--output-root`, one output folder named after each ND2 stem is written
+under that output parent. Without it, output is written beside each ND2.
 
 ### Processing while data is still downloading
 
@@ -124,6 +121,9 @@ transfer finishes, do the full-folder batch run for everything still unprocessed
 | `--segmentation-mode` | `apg` | APG (recommended for touching nuclei); AMG is the plain SAM alternative |
 | `--model-type` | `vit_b_lm` | µSAM model fine-tuned on fluorescence microscopy; `vit_l_lm` is larger and slower for marginal gain on clean nuclei |
 | `--border-margin` | `5` | Min distance (px) from image border to nucleus centroid; smaller masks at edges discarded |
+| `--mask-border-margin` | `-1` | Reject a mask whose pixels touch this edge margin; locked workflow uses `0` |
+| `--device` | `auto` | `auto`, `cuda`, `mps`, or `cpu`; use explicit CUDA after a successful GPU preflight for a large batch |
+| `--output-root` | ND2 parent | Parent containing one output folder per ND2 stem |
 
 ### Outputs (per .nd2 file)
 
@@ -152,8 +152,8 @@ Recursively finds all `*_crops.json` files under the given directory and writes 
 TIFF + `_metadata.json` sidecar per crop. Run this after Step 1 completes.
 
 ```bash
-conda run -n livefish python "code (being modified)/save_crops.py" \
-    "data for analysis"
+FOV_CROP_DIR="$CROP_ROOT/<ND2_stem>" # REPLACE <ND2_stem>: Step 1 output folder
+python nucleus_segmentation/save_crops.py "$FOV_CROP_DIR"
 ```
 
 ### Outputs (per .nd2 file)

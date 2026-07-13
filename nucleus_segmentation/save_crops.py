@@ -2,8 +2,7 @@
 save_crops.py — read JSON files produced by crop_nuclei_sam.py and save TIFFs.
 
 Usage:
-    conda run -n base python "code (being modified)/save_crops.py" \
-        "data for analysis/FOV (.nd2 files)"
+    python nucleus_segmentation/save_crops.py CROP_OUTPUT_DIRECTORY
 
 Finds all *_crops.json files under the given directory tree, then for each crop:
   1. Loads the original .nd2 → (T, Z, C, Y, X) uint16 via axis normalization
@@ -21,6 +20,10 @@ import numpy as np
 import tifffile
 from pathlib import Path
 from nd2 import ND2File
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, 'reconfigure'):
+        _stream.reconfigure(encoding='utf-8', errors='replace')
 
 
 """
@@ -86,14 +89,17 @@ def load_fov_with_metadata(nd2_path: Path):
         try:
             for loop in f.experiment:
                 if getattr(loop, 'type', '').lower().startswith('time'):
-                    period_ms = getattr(loop.parameters, 'periodMs', None) \
-                                or getattr(loop.parameters, 'period', None)
+                    parameters = loop.parameters
+                    periods = getattr(parameters, 'periods', None) or []
+                    period = periods[0] if periods else parameters
+                    period_ms = getattr(period, 'periodMs', None) \
+                                or getattr(period, 'period', None)
                     if period_ms:
                         val = float(period_ms)
                         finterval_s = val / 1000.0 if val > 1000 else val
                         break
                     avg = getattr(
-                        getattr(loop.parameters, 'periodDiff', None), 'avg', None)
+                        getattr(period, 'periodDiff', None), 'avg', None)
                     if avg and avg > 0:
                         val = float(avg)
                         finterval_s = val / 1000.0 if val > 1000 else val
@@ -158,7 +164,7 @@ def load_fov_with_metadata(nd2_path: Path):
 
     target = ['T', 'Z', 'C', 'Y', 'X']
     order = [axes.index(a) for a in target]
-    fov = np.transpose(arr, order).astype(np.uint16)
+    fov = np.transpose(arr, order).astype(np.uint16, copy=False)
     T, Z, C, H, W = fov.shape
     print(f"  Final shape TZCYX: {fov.shape}")
 
@@ -181,8 +187,11 @@ def load_fov_with_metadata(nd2_path: Path):
         if nd2_ranges[c] is not None:
             display_ranges.append(nd2_ranges[c])
         else:
-            plane = fov[:, :, c].astype(np.float32)
-            nz = plane[plane > 0]
+            t_step = max(1, T // 20)
+            y_step = max(1, H // 256)
+            x_step = max(1, W // 256)
+            sample = fov[::t_step, :, c, ::y_step, ::x_step].reshape(-1)
+            nz = sample[sample > 0]
             if nz.size == 0:
                 display_ranges.append((0.0, 1.0))
             else:

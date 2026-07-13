@@ -20,13 +20,17 @@ Usage:
 
 Example:
     python3 match_m2DGaussian_to_reference.py \
-        "/Users/chenxinyi/Desktop/LIVEFISH analysis/published/published_2/FOV5_analyzed_1_copy10_count/try_analysis"
+        "/path/to/preprocessed_analysis_directory"
 """
 
 import csv
 import math
 import sys
 from pathlib import Path
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, 'reconfigure'):
+        _stream.reconfigure(encoding='utf-8', errors='replace')
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║  PARAMETERS                                                              ║

@@ -1,0 +1,35 @@
+# Python dependencies for the documented ND2 -> cleaned trajectory workflow.
+#
+# Recommended setup (from the repository root):
+#   python -m venv .venv_nd2_to_traj
+#   $Python = ".\.venv_nd2_to_traj\Scripts\python.exe"
+#   & $Python -m pip install --upgrade pip
+#   & $Python -m pip install -r requirements_nd2_to_traj.txt
+#
+# Fiji/ImageJ (with Correct 3D drift) and MATLAB are external applications and
+# cannot be installed by this requirements file.
+
+# Validated on Windows with Python 3.13.14. These are the direct/top-level
+# versions validated for the documented workflow. pip resolves their transitive
+# dependencies. nd2 0.11.1 is intentionally not used because PyPI yanked it for
+# a regression in experiment-loop detection.
+
+# Numerical and image-processing stack
+numpy==2.4.6
+scipy==1.18.0
+Pillow==12.2.0
+matplotlib==3.11.0
+scikit-image==0.26.0
+tifffile==2026.6.1
+
+# Nikon ND2 reading and lazy array access
+nd2==0.11.3
+dask[array]==2026.6.0
+
+# PyTorch is used here only as the micro-SAM segmentation backend; listing it
+# does not install or run the repository's downstream DL experiments. This pin
+# is the CPU-compatible baseline. For an NVIDIA batch environment, follow the
+# official-selector procedure in REQUIREMENTS_ND2_TO_TRAJ.md so the wheel matches
+# the local driver/CUDA platform; never guess a CUDA index URL.
+torch==2.10.0
+micro-sam==1.8.4

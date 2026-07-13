@@ -1,4 +1,4 @@
-function spt_batch(tif_path, frame_rate, pixl_um, out_dir)
+function spt_batch(tif_path, frame_rate, pixl_um, out_dir, save_filter_images)
 % spt_batch  Headless single-particle tracking — no GUI required.
 %
 % frame_rate and pixl_um are passed from run_pipeline.py (read from the
@@ -7,12 +7,19 @@ function spt_batch(tif_path, frame_rate, pixl_um, out_dir)
 %
 % out_dir (optional): directory where the .mat file is saved.
 %   If omitted, saves next to the input TIFF (original behaviour).
+% save_filter_images (optional, default false): retain the full band-pass
+%   filtered movie in the MAT file. The trajectory CSV workflow does not read
+%   this movie, so false substantially reduces cloud-disk writes and MAT size.
 %
 % Usage via run_pipeline.py or run_pipeline_v2.py.
 
 fprintf('spt_batch: %s\n', tif_path);
 fprintf('  frame_rate = %.4f Hz\n', frame_rate);
 fprintf('  pixl       = %.4f um/px\n', pixl_um);
+
+if nargin < 5 || isempty(save_filter_images)
+    save_filter_images = false;
+end
 
 info = imfinfo(tif_path);
 
@@ -24,7 +31,7 @@ sptpara.dia               = 5;
 sptpara.estD              = 0.001;
 sptpara.fitmethod         = 0;
 sptpara.boxr              = 9;
-sptpara.saveFilterImgMode = 1;
+sptpara.saveFilterImgMode = double(logical(save_filter_images));
 sptpara.trackMem          = 3;
 sptpara.cell_num          = 1;
 sptpara.IntTh             = 0;

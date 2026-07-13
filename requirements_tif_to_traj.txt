@@ -1,0 +1,9 @@
+# Minimal dependencies for pre-cropped TIFF trajectory extraction.
+# Excludes: torch, micro-sam, nd2, dask, scikit-image, pandas, Jupyter,
+# nucleus/cell segmentation, and all deep-learning workflows.
+
+numpy==2.4.6
+scipy==1.18.0
+Pillow==12.2.0
+tifffile==2026.6.1
+matplotlib==3.11.0

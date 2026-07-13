@@ -8,6 +8,7 @@ scikit-learn>=1.4
 Pillow>=10.0
 tifffile>=2024.0
 nd2>=0.10
+dask[array]>=2024.1
 matplotlib>=3.8
 scikit-image>=0.22
 micro-sam>=1.0

@@ -19,6 +19,10 @@ if (path == "") {
     print("ERROR: Provide input .tif path as macro argument.");
     exit();
 }
+if (!File.exists(path)) {
+    print("ERROR: Fiji input TIFF does not exist: " + path);
+    exit();
+}
 
 dir = File.getParent(path) + File.separator;
 name = File.getName(path);
@@ -36,6 +40,8 @@ File.makeDirectory(outputDir);
 // Open input
 // --------------------
 open(path);
+
+getDimensions(imgWidth, imgHeight, nChannels, nZSlices, nFrames);
 
 // Do not rely on selectWindow(name) in headless mode.
 // Just assume the opened image is active.
@@ -65,12 +71,18 @@ if (!Stack.isHyperstack) {
         " slices=" + nZSlices +
         " frames=" + nFrames +
         " display=Composite");
+    getDimensions(imgWidth, imgHeight, nChannels, nZSlices, nFrames);
+}
+
+if (nChannels != 3 && nChannels != 4) {
+    print("ERROR: Expected 3 or 4 channels, found " + nChannels + ".");
+    exit();
 }
 
 // --------------------
-// Enhance contrast on all 4 channels
+// Enhance contrast on all channels
 // --------------------
-for (c = 1; c <= 4; c++) {
+for (c = 1; c <= nChannels; c++) {
     Stack.setChannel(c);
     run("Enhance Contrast", "saturated=0.35");
 }
@@ -78,7 +90,7 @@ for (c = 1; c <= 4; c++) {
 // --------------------
 // Drift correction
 // --------------------
-run("Correct 3D drift", "channel=1 correct multi_time_scale sub_pixel edge_enhance only=0 lowest=1 highest=4 max_shift_x=10.000000000 max_shift_y=10.000000000 max_shift_z=10.000");
+run("Correct 3D drift", "channel=1 correct multi_time_scale sub_pixel edge_enhance only=0 lowest=1 highest=" + nChannels + " max_shift_x=10.000000000 max_shift_y=10.000000000 max_shift_z=10.000");
 
 // In headless mode, don't assume the exact title string.
 // The newly created output should now be the active image.
@@ -89,18 +101,23 @@ saveAs("Tiff", outputDir + baseName + "_correct.tif");
 // Composite + contrast
 // --------------------
 run("Make Composite");
-for (c = 1; c <= 4; c++) {
+for (c = 1; c <= nChannels; c++) {
     Stack.setChannel(c);
     run("Enhance Contrast", "saturated=0.15");
 }
 saveAs("Tiff", outputDir + baseName + "_composite.tif");
 
 // --------------------
-// Max projection
+// Max-project Z only when the acquisition actually has multiple Z slices.
+// Running Z Project on a Z=1, T>1 hyperstack can collapse the time axis.
 // --------------------
-run("Z Project...", "projection=[Max Intensity] all");
-max_name = getTitle();
-saveAs("Tiff", outputDir + max_name);
+if (nZSlices > 1) {
+    run("Z Project...", "projection=[Max Intensity] all");
+    max_name = getTitle();
+    saveAs("Tiff", outputDir + max_name);
+} else {
+    print("Z=1: skipping Z Project to preserve all " + nFrames + " time frames.");
+}
 
 run("Split Channels");
 
@@ -125,33 +142,50 @@ for (i = 0; i < titles.length; i++) {
     if (startsWith(t, "C4-")) c4Title = t;
 }
 
-if (c1Title == "" || c2Title == "" || c3Title == "" || c4Title == "") {
-    print("ERROR: Could not find all split channel windows.");
+if (c1Title == "" || c2Title == "" || c3Title == "" || (nChannels == 4 && c4Title == "")) {
+    print("ERROR: Could not find all " + nChannels + " split channel windows.");
     exit();
 }
 
-// C1 = Nucleus (blue)
-selectWindow(c1Title);
-run("Blue");
-saveAs("Tiff", outputDir + baseName + "_Nucleus.tif");
-close();
+if (nChannels == 4) {
+    // Four-channel acquisition: C1=nucleus, C2=red, C3=green, C4=purple.
+    selectWindow(c1Title);
+    run("Blue");
+    saveAs("Tiff", outputDir + baseName + "_Nucleus.tif");
+    close();
 
-// C2 = red
-selectWindow(c2Title);
-run("Red");
-saveAs("Tiff", outputDir + baseName + "_red.tif");
-close();
+    selectWindow(c2Title);
+    run("Red");
+    saveAs("Tiff", outputDir + baseName + "_red.tif");
+    close();
 
-// C3 = green
-selectWindow(c3Title);
-run("Green");
-saveAs("Tiff", outputDir + baseName + "_green.tif");
-close();
+    selectWindow(c3Title);
+    run("Green");
+    saveAs("Tiff", outputDir + baseName + "_green.tif");
+    close();
 
-// C4 = purple/magenta
-selectWindow(c4Title);
-run("Magenta");
-saveAs("Tiff", outputDir + baseName + "_purple.tif");
-close();
+    selectWindow(c4Title);
+    run("Magenta");
+    saveAs("Tiff", outputDir + baseName + "_purple.tif");
+    close();
+} else {
+    // Three-channel acquisition: C1=green, C2=red, C3=purple.
+    // Python creates a synthetic full-frame nucleus scaffold after this macro.
+    selectWindow(c1Title);
+    run("Green");
+    saveAs("Tiff", outputDir + baseName + "_green.tif");
+    close();
+
+    selectWindow(c2Title);
+    run("Red");
+    saveAs("Tiff", outputDir + baseName + "_red.tif");
+    close();
+
+    selectWindow(c3Title);
+    run("Magenta");
+    saveAs("Tiff", outputDir + baseName + "_purple.tif");
+    close();
+}
 
 setBatchMode(false);
+eval("script", "System.exit(0);");

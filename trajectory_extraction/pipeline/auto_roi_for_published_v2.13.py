@@ -3,7 +3,8 @@
 auto_roi_for_published_v2.13.py — Pixel size derived from .tif metadata.
 
 Usage:
-    python3 auto_roi_for_published_v2.13.py /path/to/image_Nucleus.tif
+    python3 auto_roi_for_published_v2.13.py /path/to/image_Nucleus.tif \
+        --reference-channel green
 
 Changes from v2.12:
   • PIXEL_SIZE_UM is no longer a hard-coded constant.  It is derived at
@@ -12,18 +13,19 @@ Changes from v2.12:
     TIFF ResolutionUnit tag.  The value is the reciprocal of pixel width
     (or height) in microns, i.e. pixels per µm.
   • read_pixel_size_from_tif() added for metadata parsing.
-  • _INTER_FRAME_MAX_PX, _INTER_FRAME_MAX_PX_RED, _GREEN_PROX_MAX_PX are
+  • _INTER_FRAME_MAX_PX, _INTER_FRAME_MAX_PX_RED, _REFERENCE_PROX_MAX_PX are
     computed inside main() after reading the metadata, then stored as
     module-level globals so all helper functions can access them unchanged.
 
 Outputs (same naming as v2.8 / v2.10 / v2.11 / v2.12):
-    RoiSet_green.zip
+    RoiSet_{reference-channel}.zip
     Nucleus_masks.tif
     G_loci{N}_traj_rela2wholeimg.csv
     P_loci{N}_traj_rela2wholeimg.csv   (omitted if no unique match found)
     R_loci{N}_traj_rela2wholeimg.csv   (omitted if no unique match found)
 """
 
+import argparse
 import sys
 import csv
 import struct
@@ -34,6 +36,10 @@ from pathlib import Path
 from scipy import ndimage
 from scipy.optimize import linear_sum_assignment
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, 'reconfigure'):
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║  PARAMETERS  —  edit these to tune the analysis                         ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
@@ -43,6 +49,9 @@ K_SIGNAL = {
     'red':    0.5,
     'purple': 0.5,
 }
+
+CHANNELS = ('green', 'red', 'purple')
+CHANNEL_PREFIX = {'green': 'G', 'red': 'R', 'purple': 'P'}
 
 # Nucleus boundary detection: Gaussian pre-blur sigma (px) before Otsu thresholding.
 NUCLEUS_SIGMA = 2.0
@@ -71,8 +80,8 @@ PIXEL_SIZE_UM = None  # set in main() from image metadata
 INTER_FRAME_MAX_NM     = 500
 INTER_FRAME_MAX_NM_RED = 750   # relaxed for red: 90th-percentile observed jump ~580 nm
 
-# Maximum distance from the green spot in the same frame for purple/red (µm).
-GREEN_PROX_MAX_UM = 3.0
+# Maximum distance from the reference spot in the same frame for target channels (µm).
+REFERENCE_PROX_MAX_UM = 3.0
 
 # Give up seeding a purple/red trajectory if no match is found in first N frames.
 SEED_MAX_FRAME = 5
@@ -85,7 +94,7 @@ MAX_BLOB_PX = 120
 # ── Derived pixel-space limits (computed in main() after reading metadata) ────
 _INTER_FRAME_MAX_PX     = None  # set in main()
 _INTER_FRAME_MAX_PX_RED = None  # set in main()
-_GREEN_PROX_MAX_PX      = None  # set in main()
+_REFERENCE_PROX_MAX_PX  = None  # set in main()
 
 # k values tried (in order) when a large blob is found; must be > base k.
 _ADAPTIVE_K_STEPS = [1.0, 1.5, 2.0]
@@ -318,6 +327,20 @@ def detect_signal_clusters(avg: np.ndarray, k: float, min_px: int, n_max: int) -
     return clusters[:n_max]
 
 
+def component_sizes_and_centroids(
+    labeled: np.ndarray, n_components: int, weights: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return component sizes and centroids without copying one full image per label."""
+    if n_components == 0:
+        return np.empty(0, dtype=np.int64), np.empty((0, 2), dtype=float)
+    labels = np.arange(1, n_components + 1)
+    sizes = np.bincount(labeled.ravel(), minlength=n_components + 1)[1:]
+    if weights is None:
+        weights = np.ones(labeled.shape, dtype=np.float32)
+    centroids = np.asarray(ndimage.center_of_mass(weights, labeled, labels), dtype=float)
+    return sizes, centroids
+
+
 def track_spot_indexed(stack: np.ndarray, centroid_avg: tuple, k: float) -> list:
     """
     Track a signal spot across all frames.
@@ -331,9 +354,8 @@ def track_spot_indexed(stack: np.ndarray, centroid_avg: tuple, k: float) -> list
         m, s   = frame[valid].mean(), frame[valid].std()
         labeled, n = ndimage.label((frame > (m + k * s)) & valid)
         best, best_d = None, ADJACENCY_PX
-        for idx in range(1, n + 1):
-            comp = labeled == idx
-            cy, cx = ndimage.center_of_mass(frame * comp)
+        _, centroids = component_sizes_and_centroids(labeled, n, weights=frame)
+        for cy, cx in centroids:
             d = np.hypot(cy - cy0, cx - cx0)
             if d < best_d:
                 best_d, best = d, (cy, cx)
@@ -357,36 +379,35 @@ def compute_roi_from_trajectory(indexed_pos: list, H: int, W: int) -> tuple:
 
 
 def track_channel_in_roi(stack: np.ndarray, roi: tuple,
-                         green_indexed_pos: list, green_centroid_avg: tuple,
-                         k: float, inter_frame_max_px: float = None) -> list:
+                          reference_indexed_pos: list, reference_centroid_avg: tuple,
+                          k: float, inter_frame_max_px: float = None) -> list:
     """
-    Track a purple or red spot within a fixed ROI across all frames.
-    Used for non-overlapping (singleton) loci.
+    Track a target-channel spot within a fixed ROI across all frames.
+    Used for non-overlapping (singleton) loci, anchored to the reference channel.
 
     Primary linking: candidate must be within inter_frame_max_px of last position
-    AND within _GREEN_PROX_MAX_PX of the green spot.
+    AND within _REFERENCE_PROX_MAX_PX of the reference spot.
 
     Fallback (when primary yields nothing): accept the candidate closest to the
-    green spot, as long as it is within _GREEN_PROX_MAX_PX.  This handles highly
+    reference spot, as long as it is within _REFERENCE_PROX_MAX_PX.  This handles highly
     mobile loci whose frame-to-frame displacement exceeds inter_frame_max_px but
-    whose signal stays near the green anchor.
+    whose signal stays near the reference anchor.
     """
     if inter_frame_max_px is None:
         inter_frame_max_px = _INTER_FRAME_MAX_PX
     top, left, bottom, right = roi
     n_frames = stack.shape[0]
-    green_tracked = {t: (fy, fx) for t, fy, fx in green_indexed_pos}
+    reference_tracked = {t: (fy, fx) for t, fy, fx in reference_indexed_pos}
 
     def candidates_in_roi(frame_arr):
         valid  = compute_valid_mask(frame_arr)
         m, s   = frame_arr[valid].mean(), frame_arr[valid].std()
         labeled, n = ndimage.label((frame_arr > (m + k * s)) & valid)
         found = []
-        for idx in range(1, n + 1):
-            comp = labeled == idx
-            if int(comp.sum()) < MIN_SPOT_PX:
+        sizes, centroids = component_sizes_and_centroids(labeled, n)
+        for size, (cy, cx) in zip(sizes, centroids):
+            if int(size) < MIN_SPOT_PX:
                 continue
-            cy, cx = ndimage.center_of_mass(comp)
             if top <= cy < bottom and left <= cx < right:
                 found.append((cy, cx))
         return found
@@ -399,7 +420,7 @@ def track_channel_in_roi(stack: np.ndarray, roi: tuple,
         cands = candidates_in_roi(stack[f])
         if not cands:
             continue
-        ref_y, ref_x = green_tracked.get(f, green_centroid_avg)
+        ref_y, ref_x = reference_tracked.get(f, reference_centroid_avg)
         best = min(cands, key=lambda p: np.hypot(p[0] - ref_y, p[1] - ref_x))
         seed_frame = f
         last_pos   = best
@@ -411,12 +432,12 @@ def track_channel_in_roi(stack: np.ndarray, roi: tuple,
 
     for f in range(seed_frame + 1, n_frames):
         cands = candidates_in_roi(stack[f])
-        gy, gx = green_tracked.get(f, green_centroid_avg)
+        ref_y, ref_x = reference_tracked.get(f, reference_centroid_avg)
 
-        # Primary: inter-frame constraint + green proximity
+        # Primary: inter-frame constraint + reference proximity
         cands_primary = [(cy, cx) for cy, cx in cands
-                         if np.hypot(cy - last_pos[0], cx - last_pos[1]) <= inter_frame_max_px
-                         and np.hypot(cy - gy, cx - gx) <= _GREEN_PROX_MAX_PX]
+                          if np.hypot(cy - last_pos[0], cx - last_pos[1]) <= inter_frame_max_px
+                          and np.hypot(cy - ref_y, cx - ref_x) <= _REFERENCE_PROX_MAX_PX]
         if cands_primary:
             best = min(cands_primary,
                        key=lambda p: np.hypot(p[0] - last_pos[0], p[1] - last_pos[1]))
@@ -424,11 +445,11 @@ def track_channel_in_roi(stack: np.ndarray, roi: tuple,
             positions.append((f, best[0], best[1]))
             continue
 
-        # Fallback: green proximity only (handles highly mobile loci)
+        # Fallback: reference proximity only (handles highly mobile loci)
         cands_fallback = [(cy, cx) for cy, cx in cands
-                          if np.hypot(cy - gy, cx - gx) <= _GREEN_PROX_MAX_PX]
+                          if np.hypot(cy - ref_y, cx - ref_x) <= _REFERENCE_PROX_MAX_PX]
         if cands_fallback:
-            best = min(cands_fallback, key=lambda p: np.hypot(p[0] - gy, p[1] - gx))
+            best = min(cands_fallback, key=lambda p: np.hypot(p[0] - ref_y, p[1] - ref_x))
             last_pos = best
             positions.append((f, best[0], best[1]))
 
@@ -708,27 +729,27 @@ def find_seed_trajectories_in_mask(stack: np.ndarray, union_mask: np.ndarray,
     return track_points, track_k_last
 
 
-def match_seeds_to_greens(seed_trajs: list, seed_ks: list,
-                           green_trajs_dict: dict) -> dict:
+def match_seeds_to_reference(seed_trajs: list, seed_ks: list,
+                             reference_trajs_dict: dict) -> dict:
     """
-    Optimal one-to-one matching between seed trajectories and green loci using
+    Optimal one-to-one matching between seed trajectories and reference loci using
     the Linear Sum Assignment algorithm (minimises total pairwise distance).
 
     Cost matrix entry [i, j]:
-      - Average Euclidean distance (px) between seed_trajs[i] and green locus j
+      - Average Euclidean distance (px) between seed_trajs[i] and reference locus j
         across their shared seed frames.
       - Set to a large sentinel (1e9) when there are no shared frames.
 
-    After solving, pairs whose average distance exceeds _GREEN_PROX_MAX_PX are
+    After solving, pairs whose average distance exceeds _REFERENCE_PROX_MAX_PX are
     rejected.
 
     Returns dict mapping label → (seed_traj, k_propagate), where k_propagate is
     seed_ks[i] for the matched seed trajectory i.
     """
-    labels = list(green_trajs_dict.keys())
-    green_by_frame = {
+    labels = list(reference_trajs_dict.keys())
+    reference_by_frame = {
         label: {f: (y, x) for f, y, x in traj}
-        for label, traj in green_trajs_dict.items()
+        for label, traj in reference_trajs_dict.items()
     }
 
     n_seeds = len(seed_trajs)
@@ -742,12 +763,12 @@ def match_seeds_to_greens(seed_trajs: list, seed_ks: list,
     for si, seed_traj in enumerate(seed_trajs):
         seed_by_frame = {f: (y, x) for f, y, x in seed_traj}
         for li, label in enumerate(labels):
-            shared = [f for f in seed_by_frame if f in green_by_frame[label]]
+            shared = [f for f in seed_by_frame if f in reference_by_frame[label]]
             if not shared:
                 continue
             cost[si, li] = float(np.mean([
-                np.hypot(seed_by_frame[f][0] - green_by_frame[label][f][0],
-                         seed_by_frame[f][1] - green_by_frame[label][f][1])
+                np.hypot(seed_by_frame[f][0] - reference_by_frame[label][f][0],
+                         seed_by_frame[f][1] - reference_by_frame[label][f][1])
                 for f in shared
             ]))
 
@@ -757,7 +778,7 @@ def match_seeds_to_greens(seed_trajs: list, seed_ks: list,
     for si, li in zip(row_ind, col_ind):
         if cost[si, li] >= _INF:
             continue
-        if cost[si, li] > _GREEN_PROX_MAX_PX:
+        if cost[si, li] > _REFERENCE_PROX_MAX_PX:
             continue
         assignments[labels[li]] = (seed_trajs[si], seed_ks[si])
 
@@ -765,7 +786,7 @@ def match_seeds_to_greens(seed_trajs: list, seed_ks: list,
 
 
 def propagate_from_seed(stack: np.ndarray, roi: tuple, seed_traj: list,
-                         green_indexed_pos: list, green_centroid_avg: tuple,
+                         reference_indexed_pos: list, reference_centroid_avg: tuple,
                          k: float, inter_frame_max_px: float = None) -> list:
     """
     Propagate tracking from a pre-computed seed trajectory within roi.
@@ -775,12 +796,12 @@ def propagate_from_seed(stack: np.ndarray, roi: tuple, seed_traj: list,
     the seed came from adaptive blob splitting).
 
     Primary linking: candidate within inter_frame_max_px of last position AND
-    within _GREEN_PROX_MAX_PX of the green spot.
+    within _REFERENCE_PROX_MAX_PX of the reference spot.
 
     Fallback (same as track_channel_in_roi): when primary yields nothing,
-    accept the candidate closest to the green spot within _GREEN_PROX_MAX_PX.
+    accept the candidate closest to the reference spot within _REFERENCE_PROX_MAX_PX.
     This recovers highly mobile loci whose frame-to-frame displacement exceeds
-    inter_frame_max_px but whose signal stays near the green anchor.
+    inter_frame_max_px but whose signal stays near the reference anchor.
 
     Returns the complete trajectory: seed_traj positions + propagated positions.
     """
@@ -791,18 +812,17 @@ def propagate_from_seed(stack: np.ndarray, roi: tuple, seed_traj: list,
 
     top, left, bottom, right = roi
     n_frames = stack.shape[0]
-    green_tracked = {t: (fy, fx) for t, fy, fx in green_indexed_pos}
+    reference_tracked = {t: (fy, fx) for t, fy, fx in reference_indexed_pos}
 
     def candidates_in_roi(frame_arr):
         valid  = compute_valid_mask(frame_arr)
         m, s   = frame_arr[valid].mean(), frame_arr[valid].std()
         labeled, n = ndimage.label((frame_arr > (m + k * s)) & valid)
         found = []
-        for idx in range(1, n + 1):
-            comp = labeled == idx
-            if int(comp.sum()) < MIN_SPOT_PX:
+        sizes, centroids = component_sizes_and_centroids(labeled, n)
+        for size, (cy, cx) in zip(sizes, centroids):
+            if int(size) < MIN_SPOT_PX:
                 continue
-            cy, cx = ndimage.center_of_mass(comp)
             if top <= cy < bottom and left <= cx < right:
                 found.append((cy, cx))
         return found
@@ -813,12 +833,12 @@ def propagate_from_seed(stack: np.ndarray, roi: tuple, seed_traj: list,
 
     for f in range(seed_frame + 1, n_frames):
         cands = candidates_in_roi(stack[f])
-        gy, gx = green_tracked.get(f, green_centroid_avg)
+        ref_y, ref_x = reference_tracked.get(f, reference_centroid_avg)
 
-        # Primary: inter-frame constraint + green proximity
+        # Primary: inter-frame constraint + reference proximity
         cands_primary = [(cy, cx) for cy, cx in cands
-                         if np.hypot(cy - last_pos[0], cx - last_pos[1]) <= inter_frame_max_px
-                         and np.hypot(cy - gy, cx - gx) <= _GREEN_PROX_MAX_PX]
+                          if np.hypot(cy - last_pos[0], cx - last_pos[1]) <= inter_frame_max_px
+                          and np.hypot(cy - ref_y, cx - ref_x) <= _REFERENCE_PROX_MAX_PX]
         if cands_primary:
             best = min(cands_primary,
                        key=lambda p: np.hypot(p[0] - last_pos[0], p[1] - last_pos[1]))
@@ -826,11 +846,11 @@ def propagate_from_seed(stack: np.ndarray, roi: tuple, seed_traj: list,
             positions.append((f, best[0], best[1]))
             continue
 
-        # Fallback: green proximity only (handles highly mobile loci)
+        # Fallback: reference proximity only (handles highly mobile loci)
         cands_fallback = [(cy, cx) for cy, cx in cands
-                          if np.hypot(cy - gy, cx - gx) <= _GREEN_PROX_MAX_PX]
+                          if np.hypot(cy - ref_y, cx - ref_x) <= _REFERENCE_PROX_MAX_PX]
         if cands_fallback:
-            best = min(cands_fallback, key=lambda p: np.hypot(p[0] - gy, p[1] - gx))
+            best = min(cands_fallback, key=lambda p: np.hypot(p[0] - ref_y, p[1] - ref_x))
             last_pos = best
             positions.append((f, best[0], best[1]))
 
@@ -840,11 +860,22 @@ def propagate_from_seed(stack: np.ndarray, roi: tuple, seed_traj: list,
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 auto_roi_for_published_v2.13.py <path_to_*_Nucleus.tif>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Build reference and target trajectories from registered channel TIFFs."
+    )
+    parser.add_argument("nucleus_path", type=Path, help="Path to the *_Nucleus.tif file.")
+    parser.add_argument(
+        "--reference-channel",
+        choices=CHANNELS,
+        default="green",
+        help="Anchor channel for Stage 1 (default: green); the other two channels are targets.",
+    )
+    args = parser.parse_args()
 
-    nucleus_path = Path(sys.argv[1]).resolve()
+    nucleus_path = args.nucleus_path.resolve()
+    reference_channel = args.reference_channel
+    target_channels = tuple(channel for channel in CHANNELS if channel != reference_channel)
+    reference_prefix = CHANNEL_PREFIX[reference_channel]
     if not nucleus_path.name.endswith('_Nucleus.tif'):
         print("ERROR: input filename must end with '_Nucleus.tif'")
         sys.exit(1)
@@ -863,13 +894,14 @@ def main():
 
     out_dir = nucleus_path.parent
     print(f"Input   : {nucleus_path.name}")
-    print(f"Green   : {paths['green'].name}")
+    print(f"Reference channel: {reference_channel} ({paths[reference_channel].name})")
+    print(f"Target channels  : {', '.join(target_channels)}")
     print(f"Red     : {paths['red'].name}")
     print(f"Purple  : {paths['purple'].name}")
     print(f"Output  : {out_dir}")
 
     # ── Derive pixel size from .tif metadata ─────────────────────────────────
-    global PIXEL_SIZE_UM, _INTER_FRAME_MAX_PX, _INTER_FRAME_MAX_PX_RED, _GREEN_PROX_MAX_PX
+    global PIXEL_SIZE_UM, _INTER_FRAME_MAX_PX, _INTER_FRAME_MAX_PX_RED, _REFERENCE_PROX_MAX_PX
     try:
         PIXEL_SIZE_UM = read_pixel_size_from_tif(nucleus_path)
     except ValueError as e:
@@ -877,12 +909,12 @@ def main():
         sys.exit(1)
     _INTER_FRAME_MAX_PX     = INTER_FRAME_MAX_NM     * PIXEL_SIZE_UM / 1000.0
     _INTER_FRAME_MAX_PX_RED = INTER_FRAME_MAX_NM_RED * PIXEL_SIZE_UM / 1000.0
-    _GREEN_PROX_MAX_PX      = GREEN_PROX_MAX_UM      * PIXEL_SIZE_UM
+    _REFERENCE_PROX_MAX_PX  = REFERENCE_PROX_MAX_UM  * PIXEL_SIZE_UM
 
     print(f"Pixel   : {PIXEL_SIZE_UM:.4f} px/µm (from metadata)  "
           f"inter-frame limit purple={INTER_FRAME_MAX_NM} nm ({_INTER_FRAME_MAX_PX:.1f} px)  "
           f"red={INTER_FRAME_MAX_NM_RED} nm ({_INTER_FRAME_MAX_PX_RED:.1f} px)  "
-          f"green-proximity limit {GREEN_PROX_MAX_UM} µm ({_GREEN_PROX_MAX_PX:.1f} px)  "
+          f"reference-proximity limit {REFERENCE_PROX_MAX_UM} µm ({_REFERENCE_PROX_MAX_PX:.1f} px)  "
           f"padding {PADDING} px")
     print(f"Blob    : MAX_BLOB_PX={MAX_BLOB_PX} px  "
           f"adaptive k steps={_ADAPTIVE_K_STEPS} (overlap groups only)")
@@ -890,9 +922,9 @@ def main():
     # ── Load stacks ───────────────────────────────────────────────────────────
     print("\nLoading stacks...")
     stacks   = {ch: load_stack(p) for ch, p in paths.items()}
-    H, W     = stacks['green'].shape[1], stacks['green'].shape[2]
-    n_frames = stacks['green'].shape[0]
-    avgs     = {ch: stacks[ch].mean(axis=0) for ch in ('green', 'red', 'purple')}
+    H, W     = stacks[reference_channel].shape[1], stacks[reference_channel].shape[2]
+    n_frames = stacks[reference_channel].shape[0]
+    avgs     = {ch: stacks[ch].mean(axis=0) for ch in CHANNELS}
     print(f"  {n_frames} frames, {H}×{W} px")
 
     # ── Per-frame nucleus masks ───────────────────────────────────────────────
@@ -906,40 +938,44 @@ def main():
     print(f"  Saved : {masks_path.name}")
 
     # ── Signal detection on green averaged image ──────────────────────────────
-    print("\nDetecting green signal clusters (time-averaged image)...")
-    _valid = compute_valid_mask(avgs['green'])
-    m_g = float(avgs['green'][_valid].mean())
-    s_g = float(avgs['green'][_valid].std())
-    green_clusters = detect_signal_clusters(avgs['green'], K_SIGNAL['green'], MIN_SPOT_PX, N_MAX)
-    print(f"  green   : {len(green_clusters)} cluster(s)  "
-          f"threshold = {m_g:.1f} + {K_SIGNAL['green']}×{s_g:.1f} = "
-          f"{m_g + K_SIGNAL['green']*s_g:.1f}  "
-          f"sizes = {[c['size'] for c in green_clusters]}")
+    print(f"\nDetecting {reference_channel} reference signal clusters (time-averaged image)...")
+    _valid = compute_valid_mask(avgs[reference_channel])
+    ref_mean = float(avgs[reference_channel][_valid].mean())
+    ref_std = float(avgs[reference_channel][_valid].std())
+    reference_clusters = detect_signal_clusters(
+        avgs[reference_channel], K_SIGNAL[reference_channel], MIN_SPOT_PX, N_MAX
+    )
+    print(f"  {reference_channel:<7}: {len(reference_clusters)} cluster(s)  "
+          f"threshold = {ref_mean:.1f} + {K_SIGNAL[reference_channel]}×{ref_std:.1f} = "
+          f"{ref_mean + K_SIGNAL[reference_channel]*ref_std:.1f}  "
+          f"sizes = {[c['size'] for c in reference_clusters]}")
 
-    if not green_clusters:
-        print("\nNo green signal clusters found. "
-              "Try lowering K_SIGNAL['green'] or MIN_SPOT_PX.")
+    if not reference_clusters:
+        print(f"\nNo {reference_channel} reference signal clusters found. "
+              f"Try lowering K_SIGNAL['{reference_channel}'] or MIN_SPOT_PX.")
         sys.exit(0)
 
     # ╔══════════════════════════════════════════════════════════════════════╗
     # ║  PASS 1 — Green tracking and ROI computation                        ║
     # ╚══════════════════════════════════════════════════════════════════════╝
     print("\n" + "═"*60)
-    print("Pass 1 — Green tracking and ROI computation")
+    print(f"Pass 1 — {reference_channel.capitalize()} reference tracking and ROI computation")
     print("═"*60)
 
     accepted    = []
     accepted_rois = []
 
-    for idx, spot in enumerate(green_clusters):
+    for idx, spot in enumerate(reference_clusters):
         cy, cx = spot['centroid']
         print(f"\n  Spot {idx+1}: centroid=({cy:.1f}, {cx:.1f})  "
               f"size={spot['size']} px  intensity={spot['intensity']:.1f}")
 
-        indexed_pos = track_spot_indexed(stacks['green'], (cy, cx), K_SIGNAL['green'])
-        print(f"    Green tracked in {len(indexed_pos)}/{n_frames} frames")
+        indexed_pos = track_spot_indexed(
+            stacks[reference_channel], (cy, cx), K_SIGNAL[reference_channel]
+        )
+        print(f"    {reference_channel.capitalize()} tracked in {len(indexed_pos)}/{n_frames} frames")
         if not indexed_pos:
-            print(f"    ✗ Skipped: green spot not trackable")
+            print(f"    ✗ Skipped: reference spot not trackable")
             continue
 
         checkable = [(t, fy, fx) for t, fy, fx in indexed_pos
@@ -956,7 +992,7 @@ def main():
             print(f"    ~ {len(outside)}/{len(checkable)} frame(s) outside nucleus "
                   f"({100*frac_outside:.1f}%) — within tolerance, accepted")
         else:
-            print(f"    ✓ All green positions within nucleus")
+            print(f"    ✓ All reference positions within nucleus")
 
         ys = [p[1] for p in indexed_pos]
         xs = [p[2] for p in indexed_pos]
@@ -970,15 +1006,15 @@ def main():
         accepted.append((label, indexed_pos, (t_roi, l, b, r), (cy, cx)))
         accepted_rois.append(roi_dict(t_roi, l, b, r, label))
 
-        g_csv = out_dir / f'G_loci{label}_traj_rela2wholeimg.csv'
-        save_trajectory_csv(indexed_pos, g_csv)
-        print(f"    Saved: {g_csv.name}  ({len(indexed_pos)} points)")
+        reference_csv = out_dir / f'{reference_prefix}_loci{label}_traj_rela2wholeimg.csv'
+        save_trajectory_csv(indexed_pos, reference_csv)
+        print(f"    Saved: {reference_csv.name}  ({len(indexed_pos)} points)")
 
         if len(accepted) >= N_MAX:
             break
 
     if not accepted:
-        print("\nNo green loci accepted. Exiting.")
+        print(f"\nNo {reference_channel} reference loci accepted. Exiting.")
         sys.exit(0)
 
     # ╔══════════════════════════════════════════════════════════════════════╗
@@ -1001,7 +1037,7 @@ def main():
     # ║  PASS 2 — Purple and Red tracking                                   ║
     # ╚══════════════════════════════════════════════════════════════════════╝
     print(f"\n{'═'*60}")
-    print("Pass 2 — Purple and Red tracking")
+    print(f"Pass 2 — target-channel tracking ({', '.join(target_channels)})")
     print(f"{'═'*60}")
 
     for group_indices in overlap_groups:
@@ -1009,14 +1045,15 @@ def main():
 
         if len(group) == 1:
             # ── No overlap: identical to v2.8 / v2.10 ────────────────────────
-            label, green_traj, roi, centroid_avg = group[0]
+            label, reference_traj, roi, centroid_avg = group[0]
             print(f"\n  Loci {label} (singleton — standard tracking):")
 
-            for ch, prefix in (('purple', 'P'), ('red', 'R')):
+            for ch in target_channels:
+                prefix = CHANNEL_PREFIX[ch]
                 ifpx = _INTER_FRAME_MAX_PX_RED if ch == 'red' else _INTER_FRAME_MAX_PX
                 print(f"    ── {ch.capitalize()} tracking ──")
                 pos = track_channel_in_roi(
-                    stacks[ch], roi, green_traj, centroid_avg, K_SIGNAL[ch],
+                    stacks[ch], roi, reference_traj, centroid_avg, K_SIGNAL[ch],
                     inter_frame_max_px=ifpx)
                 if pos:
                     csv_path = out_dir / f'{prefix}_loci{label}_traj_rela2wholeimg.csv'
@@ -1034,7 +1071,8 @@ def main():
             group_rois = [acc[2] for acc in group]
             union_mask = compute_union_mask(group_rois, H, W)
 
-            for ch, prefix in (('purple', 'P'), ('red', 'R')):
+            for ch in target_channels:
+                prefix = CHANNEL_PREFIX[ch]
                 ifpx = _INTER_FRAME_MAX_PX_RED if ch == 'red' else _INTER_FRAME_MAX_PX
                 print(f"    ── {ch.capitalize()} tracking (joint) ──")
 
@@ -1043,28 +1081,28 @@ def main():
                     inter_frame_max_px=ifpx)
                 print(f"    Seed trajectories found in union ROI: {len(seed_trajs)}")
 
-                green_trajs_dict = {acc[0]: acc[1] for acc in group}
-                assignments = match_seeds_to_greens(
-                    seed_trajs, seed_ks, green_trajs_dict)
+                reference_trajs_dict = {acc[0]: acc[1] for acc in group}
+                assignments = match_seeds_to_reference(
+                    seed_trajs, seed_ks, reference_trajs_dict)
 
-                for label, green_traj, roi, centroid_avg in group:
+                for label, reference_traj, roi, centroid_avg in group:
                     if label in assignments:
                         seed_traj, k_propagate = assignments[label]
                         _sbf = {f: (y, x) for f, y, x in seed_traj}
-                        _gbf = {f: (y, x) for f, y, x in green_traj}
-                        _shared = [f for f in _sbf if f in _gbf]
+                        _reference_by_frame = {f: (y, x) for f, y, x in reference_traj}
+                        _shared = [f for f in _sbf if f in _reference_by_frame]
                         avg_d = float(np.mean([
-                            np.hypot(_sbf[f][0] - _gbf[f][0],
-                                     _sbf[f][1] - _gbf[f][1])
+                            np.hypot(_sbf[f][0] - _reference_by_frame[f][0],
+                                     _sbf[f][1] - _reference_by_frame[f][1])
                             for f in _shared
                         ])) if _shared else float('nan')
                         print(f"    Loci{label}: matched seed "
                               f"(seed frames {[s[0] for s in seed_traj]}, "
-                              f"avg dist to green = {avg_d:.2f} px, "
+                              f"avg dist to {reference_channel} reference = {avg_d:.2f} px, "
                               f"propagation k={k_propagate})")
                         pos = propagate_from_seed(
                             stacks[ch], roi, seed_traj,
-                            green_traj, centroid_avg, k_propagate,
+                            reference_traj, centroid_avg, k_propagate,
                             inter_frame_max_px=ifpx)
                         if pos:
                             csv_path = out_dir / (
@@ -1080,14 +1118,14 @@ def main():
                               f"competing loci={len(group)}) — no trajectory written")
 
     # ── Save ROI zip ──────────────────────────────────────────────────────────
-    green_zip = out_dir / 'RoiSet_green.zip'
-    save_roi_zip(accepted_rois, green_zip, out_dir)
+    reference_zip = out_dir / f'RoiSet_{reference_channel}.zip'
+    save_roi_zip(accepted_rois, reference_zip, out_dir)
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n{'═'*60}")
     print("Summary")
     print(f"{'═'*60}")
-    print(f"  Green ROIs ({len(accepted_rois)}): "
+    print(f"  {reference_channel.capitalize()} reference ROIs ({len(accepted_rois)}): "
           f"{['loci'+str(r['label']) for r in accepted_rois]}")
     n_overlap = sum(1 for g in overlap_groups if len(g) > 1)
     if n_overlap:

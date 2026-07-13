@@ -6,7 +6,7 @@ Standalone version: all MATLAB dependencies are bundled in matlab_deps/ next to
 this script. No external SPT installation or hardcoded paths required.
 
 Steps:
-  1. auto_roi_for_published_v2.13.py — detect green loci, output reference trajectories
+  1. auto_roi_for_published_v2.13.py — detect selected reference-channel loci, output reference trajectories
                                        (joint seeding for overlapping ROIs)
   2. run_pipeline_v3.py              — run MATLAB SPT using bundled matlab_deps/
   3. match_m2DGaussian_to_reference.py — match MATLAB tracks to reference tracks
@@ -18,14 +18,20 @@ Example:
     python3 run_full_pipeline_v3.py /path/to/FOV5_analyzed/try_analysis
 """
 
+import argparse
+import os
 import sys
 import subprocess
 from datetime import datetime
 from pathlib import Path
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, 'reconfigure'):
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+
 HERE = Path(__file__).parent.resolve()
 
-V212_SCRIPT  = HERE / 'auto_roi_for_published_v2.13.py'
+STAGE1_SCRIPT = HERE / 'auto_roi_for_published_v2.13.py'
 SPT_SCRIPT   = HERE / 'run_pipeline_v3.py'
 MATCH_SCRIPT = HERE / 'match_m2DGaussian_to_reference.py'
 
@@ -52,7 +58,18 @@ def run(cmd: list):
     print(f"\n{'═'*70}")
     print('Running: ' + ' '.join(f'"{c}"' if ' ' in c else c for c in cmd))
     print(f"{'═'*70}")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    env = os.environ.copy()
+    env.setdefault('PYTHONUTF8', '1')
+    env.setdefault('PYTHONIOENCODING', 'utf-8')
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+    )
     for line in proc.stdout:
         sys.stdout.write(line)
     proc.wait()
@@ -62,17 +79,26 @@ def run(cmd: list):
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python3 run_full_pipeline_v3.py <try_analysis_dir>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Run the standalone trajectory extraction pipeline.")
+    parser.add_argument("analysis_dir", type=Path)
+    parser.add_argument(
+        "--reference-channel",
+        choices=("green", "red", "purple"),
+        default="green",
+        help="Stage 1 anchor channel; the other two channels are targets (default: green).",
+    )
+    parser.add_argument('--matlab-bin', default='matlab')
+    parser.add_argument('--matlab-workers', type=int, choices=(1, 2, 3), default=1)
+    parser.add_argument('--matlab-save-filter-images', action='store_true')
+    args = parser.parse_args()
 
-    analysis_dir = Path(sys.argv[1]).resolve()
+    analysis_dir = args.analysis_dir.resolve()
     if not analysis_dir.is_dir():
         print(f"ERROR: not a directory: {analysis_dir}")
         sys.exit(1)
 
     log_path = analysis_dir / 'log_trajectory_v3.txt'
-    with open(log_path, 'w') as log_file:
+    with open(log_path, 'w', encoding='utf-8') as log_file:
         original_stdout = sys.stdout
         sys.stdout = Tee(original_stdout, log_file)
         try:
@@ -90,13 +116,30 @@ def main():
             print(f"Nucleus file     : {nucleus_path.name}")
 
             # Step 1 — reference trajectories
-            run(['python3', str(V212_SCRIPT), str(nucleus_path)])
+            run([
+                sys.executable,
+                str(STAGE1_SCRIPT),
+                str(nucleus_path),
+                "--reference-channel",
+                args.reference_channel,
+            ])
 
             # Step 2 — MATLAB SPT trajectories (uses bundled matlab_deps/)
-            run(['python3', str(SPT_SCRIPT), str(analysis_dir)])
+            stage2_cmd = [
+                sys.executable,
+                str(SPT_SCRIPT),
+                str(analysis_dir),
+                '--matlab-bin',
+                args.matlab_bin,
+                '--matlab-workers',
+                str(args.matlab_workers),
+            ]
+            if args.matlab_save_filter_images:
+                stage2_cmd.append('--matlab-save-filter-images')
+            run(stage2_cmd)
 
             # Step 3 — match MATLAB tracks to reference tracks
-            run(['python3', str(MATCH_SCRIPT), str(analysis_dir)])
+            run([sys.executable, str(MATCH_SCRIPT), str(analysis_dir)])
 
             print(f"\n{'═'*70}")
             print(f"Pipeline complete: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

@@ -18,22 +18,27 @@ Outputs (all inside input_dir/matlab_result/):
     - matlab_trajectory/G_m2DGaussian_traj1.csv, R_..., P_..., etc.
 
 Requirements:
-    - Python: Pillow, numpy, scipy  (pip install -r requirements.txt)
+    - Python: install ../../requirements_tif_to_traj.txt
     - MATLAB must be on your PATH  (test with: matlab -batch "disp('ok')")
 """
 
+import argparse
 import sys
 import re
 import subprocess
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import scipy.io as sio
 from pathlib import Path
 from PIL import Image
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, 'reconfigure'):
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 HERE         = Path(__file__).parent.resolve()
 MATLAB_DEPS  = HERE / 'matlab_deps'   # bundled .m files
-MATLAB_BIN   = 'matlab'               # resolved from PATH
-
 _CHANNEL_PREFIX = {'green': 'G', 'red': 'R', 'purple': 'P'}
 
 
@@ -72,28 +77,127 @@ def read_tiff_metadata(path: Path) -> tuple:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Step 1 — Run spt_batch.m on each channel TIFF
+# Step 1 — Run spt_batch.m on channel groups
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def run_spt(tifs: dict, frame_rate: float, pixl_um: float, out_dir: Path):
-    for ch, tif in tifs.items():
-        print(f'\n  Running spt_batch on {tif.name} ...')
-        matlab_cmd = (
-            f"addpath('{MATLAB_DEPS}'); "
-            f"addpath('{HERE}'); "
-            f"spt_batch('{tif}', {frame_rate}, {pixl_um}, '{out_dir}')"
-        )
-        result = subprocess.run(
-            [MATLAB_BIN, '-batch', matlab_cmd],
-            input='y\n', capture_output=True, text=True
-        )
-        if result.stdout.strip():
-            print(result.stdout.rstrip())
-        if result.stderr.strip():
-            print(result.stderr.rstrip())
-        if result.returncode != 0:
-            print(f'  [ERROR] spt_batch failed for {tif.name} '
-                  f'(exit code {result.returncode})')
+def matlab_quote(value: Path | str) -> str:
+    """Escape a path/string for a single-quoted MATLAB character vector."""
+    return str(value).replace("'", "''")
+
+
+def partition_channels(channels: list[str], worker_count: int) -> list[list[str]]:
+    """Split three channels across MATLAB processes without starting extras."""
+    groups = [[] for _ in range(min(worker_count, len(channels)))]
+    for index, channel in enumerate(channels):
+        groups[index % len(groups)].append(channel)
+    return groups
+
+
+def matlab_command(
+    channels: list[str],
+    tifs: dict[str, Path],
+    frame_rate: float,
+    pixl_um: float,
+    out_dir: Path,
+    save_filter_images: bool,
+) -> str:
+    keep_filters = 'true' if save_filter_images else 'false'
+    calls = '; '.join(
+        f"spt_batch('{matlab_quote(tifs[channel])}', {frame_rate}, {pixl_um}, "
+        f"'{matlab_quote(out_dir)}', {keep_filters})"
+        for channel in channels
+    )
+    return (
+        f"addpath('{matlab_quote(MATLAB_DEPS)}'); "
+        f"addpath('{matlab_quote(HERE)}'); {calls}"
+    )
+
+
+def run_matlab_group(
+    channels: list[str],
+    tifs: dict[str, Path],
+    frame_rate: float,
+    pixl_um: float,
+    out_dir: Path,
+    matlab_bin: str,
+    save_filter_images: bool,
+) -> tuple[list[str], int, str, float]:
+    started = time.perf_counter()
+    command = matlab_command(
+        channels, tifs, frame_rate, pixl_um, out_dir, save_filter_images
+    )
+    result = subprocess.run(
+        [matlab_bin, '-batch', command],
+        capture_output=True,
+        text=True,
+        encoding='utf-8',
+        errors='replace',
+    )
+    output = '\n'.join(part for part in (result.stdout.rstrip(), result.stderr.rstrip()) if part)
+    return channels, result.returncode, output, time.perf_counter() - started
+
+
+def run_spt(
+    tifs: dict[str, Path],
+    frame_rate: float,
+    pixl_um: float,
+    out_dir: Path,
+    matlab_bin: str,
+    matlab_workers: int,
+    save_filter_images: bool,
+) -> None:
+    channels = list(tifs)
+    groups = partition_channels(channels, matlab_workers)
+    print(f'  MATLAB processes: {len(groups)}')
+    print(f'  Channel groups  : {groups}')
+    print(f'  Save filter imgs: {save_filter_images}')
+    for group in groups:
+        names = ', '.join(tifs[channel].name for channel in group)
+        print(f'  Queued MATLAB group [{", ".join(group)}]: {names}')
+
+    started = time.perf_counter()
+    results = []
+    with ThreadPoolExecutor(max_workers=len(groups)) as executor:
+        pending = {
+            executor.submit(
+                run_matlab_group,
+                group,
+                tifs,
+                frame_rate,
+                pixl_um,
+                out_dir,
+                matlab_bin,
+                save_filter_images,
+            )
+            for group in groups
+        }
+        while pending:
+            completed, pending = wait(
+                pending, timeout=60, return_when=FIRST_COMPLETED
+            )
+            if not completed:
+                print(
+                    f'  MATLAB still running: {len(pending)} process(es), '
+                    f'{time.perf_counter() - started:.0f} s elapsed',
+                    flush=True,
+                )
+                continue
+            for future in completed:
+                results.append(future.result())
+
+    failures = []
+    for group, returncode, output, elapsed in results:
+        label = ','.join(group)
+        print(f'\n  --- MATLAB group {label} ({elapsed:.1f} s) ---')
+        if output:
+            print(output)
+        if returncode != 0:
+            failures.append((label, returncode))
+
+    print(f'  MATLAB SPT elapsed: {time.perf_counter() - started:.1f} s')
+    if failures:
+        details = ', '.join(f'{label}=exit {code}' for label, code in failures)
+        raise RuntimeError(f'MATLAB SPT failed: {details}')
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -103,6 +207,12 @@ def run_spt(tifs: dict, frame_rate: float, pixl_um: float, out_dir: Path):
 def export_trajectories(tifs: dict, out_dir: Path):
     csv_dir = out_dir / 'matlab_trajectory'
     csv_dir.mkdir(exist_ok=True)
+
+    # A rerun may detect fewer candidates. Remove only Stage-2 candidate CSVs so
+    # stale files cannot be matched as if they belonged to the new run.
+    for prefix in _CHANNEL_PREFIX.values():
+        for stale in csv_dir.glob(f'{prefix}_m2DGaussian_traj*.csv'):
+            stale.unlink()
 
     for ch, tif in tifs.items():
         prefix   = _CHANNEL_PREFIX[ch]
@@ -140,12 +250,38 @@ def export_trajectories(tifs: dict, out_dir: Path):
 # Main
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def main():
-    if len(sys.argv) != 2:
-        print('Usage: python3 run_pipeline_v3.py /path/to/input_dir/')
-        sys.exit(1)
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='Run MATLAB SPT and export candidate trajectories.'
+    )
+    parser.add_argument('input_dir', type=Path)
+    parser.add_argument(
+        '--matlab-bin',
+        default='matlab',
+        help='MATLAB executable or command (default: matlab from PATH).',
+    )
+    parser.add_argument(
+        '--matlab-workers',
+        type=int,
+        choices=(1, 2, 3),
+        default=1,
+        help=(
+            'Concurrent MATLAB processes. Default 1 handles all channels in one '
+            'session; 2 or 3 can reduce wall time but require more RAM/CPU and '
+            'sufficient MATLAB licensing.'
+        ),
+    )
+    parser.add_argument(
+        '--matlab-save-filter-images',
+        action='store_true',
+        help='Retain full filtered image stacks in MAT files (large; not needed for final CSVs).',
+    )
+    return parser.parse_args()
 
-    input_dir = Path(sys.argv[1]).resolve()
+
+def main():
+    args = parse_args()
+    input_dir = args.input_dir.resolve()
     if not input_dir.is_dir():
         print(f'Error: not a directory: {input_dir}')
         sys.exit(1)
@@ -178,9 +314,17 @@ def main():
     # Step 1 — SPT
     print()
     print('=' * 60)
-    print('Step 1: Running spt_batch.m on each channel')
+    print('Step 1: Running spt_batch.m on channel group(s)')
     print('=' * 60)
-    run_spt(tifs, frame_rate, pixl_um, out_dir)
+    run_spt(
+        tifs,
+        frame_rate,
+        pixl_um,
+        out_dir,
+        args.matlab_bin,
+        args.matlab_workers,
+        args.matlab_save_filter_images,
+    )
 
     # Step 2 — Export
     print()
