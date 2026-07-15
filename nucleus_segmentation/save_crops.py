@@ -232,7 +232,8 @@ for: emission/excitation wavelengths, exposure times, objective info, and per-ch
 display ranges.
 """
 def _write_sidecar(path: Path, nd2_path: Path, stem: str, idx: int,
-                   crop_shape: tuple, bbox: tuple, meta: dict):
+                   crop_shape: tuple, bbox: tuple, meta: dict,
+                   microsam_mask_path: Path | None = None):
     T, Z, C, H, W = crop_shape
     r0, r1, c0, c1 = bbox
 
@@ -257,6 +258,12 @@ def _write_sidecar(path: Path, nd2_path: Path, stem: str, idx: int,
         'crop_index':       idx,
         'crop_shape':       {'T': T, 'Z': Z, 'C': C, 'Y': H, 'X': W},
         'bbox':             {'r0': r0, 'r1': r1, 'c0': c0, 'c1': c1},
+        'microsam_mask': {
+            'path': str(microsam_mask_path.resolve()) if microsam_mask_path else None,
+            'relative_path': microsam_mask_path.name if microsam_mask_path else None,
+            'coordinate_space': 'raw crop before Fiji drift correction',
+            'frame_rule': 'static micro-SAM instance repeated across acquisition frames',
+        },
         'pixel_size': {
             'x_um': meta['px_um_x'],
             'y_um': meta['px_um_y'],
@@ -372,8 +379,23 @@ def process_json(json_path: Path):
             resolution=(xres, yres),
             metadata=ij_metadata,
         )
-        _write_sidecar(tif_path, nd2_path, stem, idx,
-                       crop.shape, (r0, r1, c0, c1), meta)
+        mask_name = crop_info.get('microsam_mask', f'{stem}_mask_{idx}.tif')
+        microsam_mask_path = out_dir / mask_name
+        if not microsam_mask_path.is_file():
+            raise FileNotFoundError(
+                f'Micro-SAM mask associated with crop {tif_path.name} is missing: '
+                f'{microsam_mask_path}'
+            )
+        _write_sidecar(
+            tif_path,
+            nd2_path,
+            stem,
+            idx,
+            crop.shape,
+            (r0, r1, c0, c1),
+            meta,
+            microsam_mask_path,
+        )
         saved += 1
 
         # Read-back verification on the first crop per nd2 file

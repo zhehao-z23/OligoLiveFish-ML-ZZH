@@ -139,15 +139,17 @@ Canonical crop code:
 
 ```text
 OligoLiveFish-ML\nucleus_segmentation\crop_nuclei_sam.py
-OligoLiveFish-ML\trajectory_extraction\pipeline\crop_nuclei_sam.py
 ```
 
 Canonical bad_qc code:
 
 ```text
 OligoLiveFish-ML\nucleus_segmentation\cell_crop_qc.py
-OligoLiveFish-ML\trajectory_extraction\pipeline\cell_crop_qc.py
 ```
+
+The former copies under `trajectory_extraction/pipeline/` were removed in v4;
+one canonical implementation prevents segmentation and trajectory code from
+silently diverging.
 
 Project-level lock document:
 

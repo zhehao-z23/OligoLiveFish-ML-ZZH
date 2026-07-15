@@ -103,3 +103,18 @@ else
     out(:,2)=mx(:,1);
     out(:,1)=mx(:,2);
 end
+
+% v4 static irregular-ROI gate. The global is set only by
+% spt_batch_anchor_roi.m, so legacy/full-field callers remain unchanged.
+% Coordinates in out are [x, y]. Filtering coarse peak centers here keeps the
+% full, unmodified image available to the subsequent Gaussian fit.
+global SPT_ROI_MASK %#ok<GVMIS>
+if ~isempty(out) && ~isempty(SPT_ROI_MASK)
+    x = round(out(:,1));
+    y = round(out(:,2));
+    valid = x >= 1 & x <= size(SPT_ROI_MASK,2) & ...
+            y >= 1 & y <= size(SPT_ROI_MASK,1);
+    keep = false(size(valid));
+    keep(valid) = SPT_ROI_MASK(sub2ind(size(SPT_ROI_MASK), y(valid), x(valid)));
+    out = out(keep,:);
+end

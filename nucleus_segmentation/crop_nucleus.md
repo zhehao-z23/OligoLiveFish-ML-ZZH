@@ -169,7 +169,7 @@ python nucleus_segmentation/save_crops.py "$FOV_CROP_DIR"
 
 TIFFs open in Fiji with per-channel colors matching the original .nd2. Each file is a
 (T, Z, C, Y, X) hyperstack ready for the downstream
-`trajectory_extraction/run_full_pipeline_v3.py` trajectory-extraction runner.
+`trajectory_extraction/run_full_pipeline_v4.py` trajectory-extraction runner.
 
 Each `_metadata.json` sidecar contains:
 - `source_nd2` — absolute path back to the originating FOV file
@@ -180,6 +180,8 @@ Each `_metadata.json` sidecar contains:
 - `time` — frame interval in seconds, fps, and number of frames
 - `acquisition` — objective name, NA, magnification, modality
 - `channels` — per-channel: name, emission wavelength (nm), exposure time (ms), display min/max
+- `microsam_mask` — exact instance-mask path and coordinate-space contract used
+  by v4 for drift alignment and anchor filtering
 
 Run Step 2 after Step 1 — it can also be re-run alone to regenerate TIFFs from existing JSONs
 (e.g. if TIFF export settings change) without re-running the slow µSAM segmentation.

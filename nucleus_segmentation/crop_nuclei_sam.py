@@ -990,6 +990,7 @@ def process_file(nd2_path: Path, predictor, segmenter, segment_fn, args):
         crops_json.append({
             'idx':              idx,
             'bbox':             [int(r0), int(r1), int(c0), int(c1)],
+            'microsam_mask':    f"{stem}_mask_{idx}.tif",
             'suppression_rows': rows.tolist(),
             'suppression_cols': cols.tolist(),
             'ch0_median_inside': metrics["ch0_median_inside"],
@@ -1011,7 +1012,12 @@ def process_file(nd2_path: Path, predictor, segmenter, segment_fn, args):
         r0, r1, c0, c1 = bbox
         mask_crop = mask[r0:r1, c0:c1].astype(np.uint8) * 255
         mask_stack = np.repeat(mask_crop[np.newaxis], T, axis=0)
-        tifffile.imwrite(out_dir / f"{stem}_mask_{idx}.tif", mask_stack)
+        tifffile.imwrite(
+            out_dir / f"{stem}_mask_{idx}.tif",
+            mask_stack,
+            imagej=True,
+            metadata={"axes": "TYX"},
+        )
     print(f"  OK {len(crops_info)} nuclear masks -> {out_dir}/")
 
     print(f"  OK {len(crops_info)} crops -> {out_dir}/")

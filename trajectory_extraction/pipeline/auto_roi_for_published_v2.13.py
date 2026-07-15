@@ -4,7 +4,7 @@ auto_roi_for_published_v2.13.py — Pixel size derived from .tif metadata.
 
 Usage:
     python3 auto_roi_for_published_v2.13.py /path/to/image_Nucleus.tif \
-        --reference-channel green
+        --reference-channel purple
 
 Changes from v2.12:
   • PIXEL_SIZE_UM is no longer a hard-coded constant.  It is derived at
@@ -867,8 +867,22 @@ def main():
     parser.add_argument(
         "--reference-channel",
         choices=CHANNELS,
-        default="green",
-        help="Anchor channel for Stage 1 (default: green); the other two channels are targets.",
+        default="purple",
+        help="Anchor channel for Stage 1 (v4 default: purple); the other two channels are targets.",
+    )
+    parser.add_argument(
+        "--nucleus-mask",
+        type=Path,
+        help=(
+            "Optional drift-aligned binary micro-SAM TYX mask. When supplied, "
+            "it is used directly for anchor filtering instead of rebuilding a "
+            "nucleus boundary with per-frame intensity Otsu."
+        ),
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Directory for Stage-1 CSV/ROI/mask outputs (default: TIFF directory).",
     )
     args = parser.parse_args()
 
@@ -892,7 +906,8 @@ def main():
             print(f"ERROR: {ch} file not found: {p}")
             sys.exit(1)
 
-    out_dir = nucleus_path.parent
+    out_dir = args.output_dir.resolve() if args.output_dir else nucleus_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Input   : {nucleus_path.name}")
     print(f"Reference channel: {reference_channel} ({paths[reference_channel].name})")
     print(f"Target channels  : {', '.join(target_channels)}")
@@ -928,9 +943,30 @@ def main():
     print(f"  {n_frames} frames, {H}×{W} px")
 
     # ── Per-frame nucleus masks ───────────────────────────────────────────────
-    print(f"\nBuilding per-frame nucleus masks (Otsu + Gaussian σ={NUCLEUS_SIGMA}, "
-          f"FILL_RATIO={FILL_RATIO})...")
-    nucleus_masks = detect_nucleus_frames(stacks['nucleus'])
+    if args.nucleus_mask:
+        supplied_path = args.nucleus_mask.resolve()
+        if not supplied_path.is_file():
+            print(f"ERROR: supplied nucleus mask not found: {supplied_path}")
+            sys.exit(1)
+        supplied = load_stack(supplied_path) > 0
+        expected_shape = (n_frames, H, W)
+        if supplied.shape != expected_shape:
+            print(
+                f"ERROR: supplied nucleus mask shape {supplied.shape} does not "
+                f"match channel stacks {expected_shape}: {supplied_path}"
+            )
+            sys.exit(1)
+        empty_frames = np.flatnonzero(~supplied.any(axis=(1, 2)))
+        if len(empty_frames):
+            preview = ", ".join(str(int(index + 1)) for index in empty_frames[:10])
+            print(f"ERROR: supplied nucleus mask is empty in frame(s): {preview}")
+            sys.exit(1)
+        print(f"\nUsing supplied drift-aligned micro-SAM nucleus mask: {supplied_path}")
+        nucleus_masks = [supplied[index] for index in range(n_frames)]
+    else:
+        print(f"\nBuilding per-frame nucleus masks (Otsu + Gaussian σ={NUCLEUS_SIGMA}, "
+              f"FILL_RATIO={FILL_RATIO})...")
+        nucleus_masks = detect_nucleus_frames(stacks['nucleus'])
     n_detected = sum(1 for m in nucleus_masks if m is not None)
     print(f"  Nucleus detected in {n_detected}/{n_frames} frames")
     masks_path = out_dir / 'Nucleus_masks.tif'

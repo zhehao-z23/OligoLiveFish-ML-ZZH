@@ -1,4 +1,4 @@
-function spt_batch(tif_path, frame_rate, pixl_um, out_dir, save_filter_images)
+function spt_batch(tif_path, frame_rate, pixl_um, out_dir, save_filter_images, max_disp_px)
 % spt_batch  Headless single-particle tracking — no GUI required.
 %
 % frame_rate and pixl_um are passed from run_pipeline.py (read from the
@@ -38,7 +38,16 @@ sptpara.IntTh             = 0;
 sptpara.file              = tif_path;
 
 avgdisp          = sqrt(4 * sptpara.estD / sptpara.f_rate);
-sptpara.max_disp = round(3 * avgdisp / sptpara.pixl);
+if nargin < 6 || isempty(max_disp_px)
+    sptpara.max_disp = round(3 * avgdisp / sptpara.pixl);
+    max_disp_source = 'legacy 3-sigma estD rule';
+else
+    if ~isscalar(max_disp_px) || ~isfinite(max_disp_px) || max_disp_px <= 0
+        error('max_disp_px must be one finite positive scalar.');
+    end
+    sptpara.max_disp = double(max_disp_px);
+    max_disp_source = 'explicit metadata/physical model or CLI override';
+end
 
 % ── Auto-threshold ────────────────────────────────────────────────────────────
 K = 0.5;
@@ -58,7 +67,7 @@ fprintf('  dia               = %d px\n',      sptpara.dia);
 fprintf('  boxr              = %d px\n',      sptpara.boxr);
 fprintf('  mtl               = %d frames\n',  sptpara.mtl);
 fprintf('  estD              = %.4f um^2/s\n',sptpara.estD);
-fprintf('  max_disp          = %d px\n',      sptpara.max_disp);
+fprintf('  max_disp          = %.3f px (%s)\n', sptpara.max_disp, max_disp_source);
 fprintf('  fitmethod         = %d  (0=2DGaussian, 1=centroid)\n', sptpara.fitmethod);
 fprintf('  trackMem          = %d frames\n',  sptpara.trackMem);
 fprintf('  IntTh             = %d\n',         sptpara.IntTh);
