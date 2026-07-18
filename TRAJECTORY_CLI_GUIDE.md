@@ -1,7 +1,8 @@
-# Trajectory CLI quick reference — v4.0.0-anchor-roi
+# Trajectory CLI quick reference — v4.1.0 experiment profiles
 
-The root [README.md](README.md) is authoritative. These commands assume the
-venv, Fiji, and MATLAB variables defined there.
+The root [README.md](README.md) is authoritative. Every production trajectory
+run must select exactly one locked biological profile. The anchor is derived
+from that profile; there is no `--anchor-channel` production override.
 
 ## One cell from a Step-3 crop
 
@@ -9,9 +10,12 @@ venv, Fiji, and MATLAB variables defined there.
 & $Python "$Repo\trajectory_extraction\run_full_pipeline_v4.py" $CropTif `
   --fiji-bin $Fiji `
   --matlab-bin $Matlab `
-  --anchor-channel purple `
+  --experiment-profile chr3_sites_2_3_4 `
   --matlab-workers 1
 ```
+
+For a verified three-channel DSB/53BP1 crop, replace the profile with
+`dsb_53bp1_site1_site2`. Do not select a profile merely to satisfy validation.
 
 ## Reuse existing Fiji outputs
 
@@ -19,7 +23,8 @@ venv, Fiji, and MATLAB variables defined there.
 & $Python "$Repo\trajectory_extraction\run_full_pipeline_v4.py" `
   --no-fiji $Analysis `
   --crop-tif $CropTif `
-  --matlab-bin $Matlab
+  --matlab-bin $Matlab `
+  --experiment-profile chr3_sites_2_3_4
 ```
 
 ## Explicit max-step override
@@ -31,6 +36,7 @@ documented scientific reason:
 & $Python "$Repo\trajectory_extraction\run_full_pipeline_v4.py" $CropTif `
   --fiji-bin $Fiji `
   --matlab-bin $Matlab `
+  --experiment-profile chr3_sites_2_3_4 `
   --max-step-px 2.75
 ```
 
@@ -44,7 +50,7 @@ model or the override.
   --crop-glob "$Stem`_*.tif" `
   --fiji-bin $Fiji `
   --matlab-bin $Matlab `
-  --anchor-channel purple `
+  --experiment-profile chr3_sites_2_3_4 `
   --cell-workers 1 `
   --matlab-workers 1 `
   --dry-run
@@ -55,12 +61,14 @@ model or the override.
 ## Useful inspection commands
 
 ```powershell
-Get-Content "$Analysis\anchor_roi_v4\anchor_roi_v4_summary.json"
-Get-Content "$Analysis\anchor_roi_v4\audit\baseline_selection.csv"
-Get-Content "$Analysis\anchor_roi_v4\audit\max_step_model.json"
-Get-ChildItem "$Analysis\anchor_roi_v4\baseline_longest\*_cleaned.csv"
-Get-ChildItem "$Analysis\anchor_roi_v4\figures" -Recurse
+$Result = "$Analysis\anchor_roi_v4_chr3_sites_2_3_4"
+Get-Content "$Result\run_manifest.json"
+Get-Content "$Result\audit\baseline_selection.csv"
+Get-Content "$Result\audit\max_step_model.json"
+Get-ChildItem "$Result\baseline_longest\*_cleaned.csv"
+Get-ChildItem "$Result\figures" -Recurse
 ```
 
-Do not call `match_m2DGaussian_to_reference.py` after v4: reference-distance
-matching is not part of the fixed anchor-ROI baseline.
+Do not call `match_m2DGaussian_to_reference.py` after v4. The legacy
+reference-distance matcher is retained only for a separately namespaced
+published-style comparison and is not part of the v4 baseline.

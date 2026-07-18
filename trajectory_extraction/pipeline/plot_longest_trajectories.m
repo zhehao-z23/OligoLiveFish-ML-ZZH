@@ -29,7 +29,6 @@ for rowIndex = 1:height(manifest)
     end
 
     allele = manifest.allele_index(rowIndex);
-    channel = manifest.channel(rowIndex);
     marker = manifest.marker(rowIndex);
     frameInterval = manifest.frame_interval_s(rowIndex);
     x = double(trajectory.x_nm);
@@ -38,7 +37,11 @@ for rowIndex = 1:height(manifest)
     x = x - median(x, 'omitnan');
     y = y - median(y, 'omitnan');
 
-    markerSlug = marker_slug(channel);
+    if ismember("marker_slug", manifest.Properties.VariableNames)
+        markerSlug = safe_marker_slug(manifest.marker_slug(rowIndex));
+    else
+        markerSlug = safe_marker_slug(marker);
+    end
     baseName = sprintf('allele_%03d_%s_longest_spt', allele, markerSlug);
     [pngFigure, pngAxis] = build_trajectory_figure(x, y, timeSeconds, ...
         frameInterval, allele, marker, height(trajectory));
@@ -95,15 +98,11 @@ set(axisHandle, 'FontSize', 12, 'LineWidth', 1);
 end
 
 
-function slug = marker_slug(channel)
-switch char(channel)
-    case 'G'
-        slug = '53bp1';
-    case 'R'
-        slug = 'site1';
-    case 'P'
-        slug = 'site2';
-    otherwise
-        slug = lower(char(channel));
+function slug = safe_marker_slug(value)
+slug = lower(char(value));
+slug = regexprep(slug, '[^a-z0-9]+', '_');
+slug = regexprep(slug, '^_+|_+$', '');
+if isempty(slug)
+    slug = 'unknown_marker';
 end
 end

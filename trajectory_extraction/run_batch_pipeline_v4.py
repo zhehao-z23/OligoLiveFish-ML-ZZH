@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run v4.0.0 anchor-ROI SPT for every valid cell crop in one FOV folder."""
+"""Run v4.1 profile-locked anchor-ROI SPT for every valid cell crop in one FOV."""
 
 from __future__ import annotations
 
@@ -14,9 +14,6 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
 
-import tifffile
-
-
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -24,9 +21,10 @@ for _stream in (sys.stdout, sys.stderr):
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "pipeline"))
 from align_microsam_mask import discover_microsam_mask
+import experiment_profiles
 
 
-VERSION = "v4.0.0-anchor-roi"
+VERSION = "v4.1.0-experiment-profiles"
 SINGLE_CELL_RUNNER = HERE / "run_full_pipeline_v4.py"
 
 
@@ -34,24 +32,24 @@ def now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def is_cell_crop(path: Path) -> tuple[bool, str]:
+def is_cell_crop(
+    path: Path, profile: experiment_profiles.ExperimentProfile
+) -> tuple[bool, str]:
     try:
-        with tifffile.TiffFile(path) as tif:
-            axes = tif.series[0].axes
-            shape = tuple(int(value) for value in tif.series[0].shape)
-        if axes not in ("TCYX", "TZCYX"):
-            return False, f"axes={axes}, expected TCYX or TZCYX"
-        if shape[axes.index("C")] not in (3, 4):
-            return False, f"shape={shape}, expected 3 or 4 channels"
+        validation = profile.validate_crop(path)
         mask = discover_microsam_mask(path)
     except Exception as exc:
         return False, str(exc)
-    return True, f"axes={axes}, shape={shape}, micro-SAM={mask.name}"
+    return True, (
+        f"profile={profile.name}, axes={validation['axes']}, "
+        f"shape={validation['shape']}, anchor={profile.anchor.marker}, "
+        f"micro-SAM={mask.name}"
+    )
 
 
 def scientific_options(args: argparse.Namespace) -> dict:
     return {
-        "anchor_channel": args.anchor_channel,
+        "experiment_profile": args.experiment_profile,
         "mask_dilation_px": args.mask_dilation_px,
         "roi_dilation_px": args.roi_dilation_px,
         "d_star": args.d_star,
@@ -67,7 +65,11 @@ def scientific_options(args: argparse.Namespace) -> dict:
 
 
 def completion_matches(analysis_dir: Path, args: argparse.Namespace) -> bool:
-    path = analysis_dir / "anchor_roi_v4" / "run_manifest.json"
+    path = (
+        analysis_dir
+        / f"anchor_roi_v4_{args.experiment_profile}"
+        / "run_manifest.json"
+    )
     if not path.is_file():
         return False
     try:
@@ -81,8 +83,14 @@ def completion_matches(analysis_dir: Path, args: argparse.Namespace) -> bool:
         return False
 
 
-def tail_log(analysis_dir: Path, line_count: int = 25) -> str:
-    path = analysis_dir / "anchor_roi_v4" / "log_anchor_roi_v4.txt"
+def tail_log(
+    analysis_dir: Path, experiment_profile: str, line_count: int = 25
+) -> str:
+    path = (
+        analysis_dir
+        / f"anchor_roi_v4_{experiment_profile}"
+        / "log_anchor_roi_v4.txt"
+    )
     if not path.is_file():
         return "v4 log was not created"
     return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-line_count:])
@@ -93,6 +101,7 @@ def run_cell(crop: Path, args: argparse.Namespace) -> dict:
     if args.resume and completion_matches(analysis_dir, args):
         return {
             "crop": str(crop), "analysis_dir": str(analysis_dir), "status": "skipped_complete",
+            "experiment_profile": args.experiment_profile,
             "started_at": "", "finished_at": now(), "duration_s": 0.0, "exit_code": 0, "error_tail": "",
         }
     command = [
@@ -100,7 +109,7 @@ def run_cell(crop: Path, args: argparse.Namespace) -> dict:
         "--fiji-bin", args.fiji_bin,
         "--matlab-bin", args.matlab_bin,
         "--matlab-workers", str(args.matlab_workers),
-        "--anchor-channel", args.anchor_channel,
+        "--experiment-profile", args.experiment_profile,
         "--mask-dilation-px", str(args.mask_dilation_px),
         "--roi-dilation-px", str(args.roi_dilation_px),
         "--d-star", str(args.d_star),
@@ -122,11 +131,14 @@ def run_cell(crop: Path, args: argparse.Namespace) -> dict:
         result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, env=environment)
         exit_code = int(result.returncode)
         status = "complete" if exit_code == 0 else "failed"
-        error_tail = "" if exit_code == 0 else tail_log(analysis_dir)
+        error_tail = "" if exit_code == 0 else tail_log(
+            analysis_dir, args.experiment_profile
+        )
     except Exception as exc:
         exit_code, status, error_tail = -1, "failed_to_start", repr(exc)
     return {
         "crop": str(crop), "analysis_dir": str(analysis_dir), "status": status,
+        "experiment_profile": args.experiment_profile,
         "started_at": started_at, "finished_at": now(),
         "duration_s": round(time.perf_counter() - started, 1),
         "exit_code": exit_code, "error_tail": error_tail,
@@ -134,7 +146,10 @@ def run_cell(crop: Path, args: argparse.Namespace) -> dict:
 
 
 def write_summary(path: Path, rows: list[dict]) -> None:
-    fields = ["crop", "analysis_dir", "status", "started_at", "finished_at", "duration_s", "exit_code", "error_tail"]
+    fields = [
+        "crop", "analysis_dir", "experiment_profile", "status", "started_at",
+        "finished_at", "duration_s", "exit_code", "error_tail",
+    ]
     with path.open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
@@ -147,7 +162,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--crop-glob", default="*.tif")
     parser.add_argument("--fiji-bin", default="fiji")
     parser.add_argument("--matlab-bin", default="matlab")
-    parser.add_argument("--anchor-channel", choices=("green", "red", "purple"), default="purple")
+    parser.add_argument(
+        "--experiment-profile",
+        choices=experiment_profiles.profile_choices(),
+        required=True,
+        help="Required locked biological channel contract; it determines the anchor automatically.",
+    )
     parser.add_argument("--cell-workers", type=int, default=1)
     parser.add_argument("--matlab-workers", type=int, choices=(1, 2, 3), default=1)
     parser.add_argument("--matlab-save-filter-images", action="store_true")
@@ -167,25 +187,30 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    profile = experiment_profiles.get_profile(args.experiment_profile)
     crop_dir = args.crop_dir.resolve()
     if not crop_dir.is_dir() or args.cell_workers < 1:
         raise SystemExit("ERROR: crop_dir must exist and --cell-workers must be >= 1")
     candidates = sorted(path for path in crop_dir.glob(args.crop_glob) if path.is_file())
     crops = []
     for path in candidates:
-        accepted, reason = is_cell_crop(path)
+        accepted, reason = is_cell_crop(path, profile)
         print(f"  [{'ACCEPT' if accepted else 'SKIP'}] {path.name}: {reason}")
         if accepted:
             crops.append(path)
     if not crops:
         raise SystemExit("ERROR: no valid cell crop with an associated micro-SAM mask")
+    print(
+        f"Profile={profile.name}; locked anchor={profile.anchor.marker} "
+        f"(raw C{profile.anchor.raw_index})"
+    )
     print(f"Valid crops={len(crops)}; cell workers={args.cell_workers}; MATLAB workers/cell={args.matlab_workers}")
     print(f"Maximum simultaneous MATLAB processes={args.cell_workers * args.matlab_workers}")
     if args.dry_run:
         print("Dry run complete; no analysis started.")
         return
 
-    summary_path = crop_dir / "trajectory_batch_v4_summary.csv"
+    summary_path = crop_dir / f"trajectory_batch_v4_{profile.name}_summary.csv"
     results, started = [], time.perf_counter()
     with ThreadPoolExecutor(max_workers=args.cell_workers) as executor:
         pending = {executor.submit(run_cell, crop, args) for crop in crops}

@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.1.0-experiment-profiles — 2026-07-18
+
+- Added two and only two locked biological acquisition profiles:
+  `chr3_sites_2_3_4` and `dsb_53bp1_site1_site2`.
+- Locked raw C2 as the anchor in both profiles while preserving its distinct
+  biological identity: Chr3 Site 2/A488 for the four-channel manuscript data,
+  and Site 2/Purple for the three-channel DSB data.
+- Added hard profile validation for channel count and filename evidence before
+  Fiji or MATLAB starts.
+- Required the Step-3 acquisition sidecar and validated the original ND2
+  channel-name order (`405/640/488/561` or `GFP/RFP/Cy5`) before execution.
+- Removed the free-form production anchor override and moved marker names,
+  slugs, fluorophores, genomic loci and raw indices into the profile contract.
+- Namespaced outputs by profile so results from the two experiments cannot
+  overwrite or be resumed as each other.
+- Removed hard-coded 53BP1/Site1/Site2 labels from CSV, Python QC and MATLAB
+  figure generation.
+
 ## 4.0.0-anchor-roi — 2026-07-14
 
 This release promotes the validated FOV15 static anchor-ROI experiment to the

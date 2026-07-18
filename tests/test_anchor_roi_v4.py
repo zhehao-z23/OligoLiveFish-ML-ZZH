@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import tifffile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,8 +17,91 @@ PIPELINE = ROOT / "trajectory_extraction" / "pipeline"
 sys.path.insert(0, str(PIPELINE))
 
 import align_microsam_mask
+import experiment_profiles
 import max_step_model
 import run_anchor_roi_spt
+
+
+class ExperimentProfileTests(unittest.TestCase):
+    @staticmethod
+    def _sidecar(path: Path, channel_names: list[str]) -> None:
+        path.with_name(path.stem + "_metadata.json").write_text(
+            json.dumps(
+                {
+                    "source_nd2": str(path.with_suffix(".nd2")),
+                    "stem": path.stem,
+                    "crop_shape": {"C": len(channel_names)},
+                    "channels": [
+                        {"index": index, "name": name}
+                        for index, name in enumerate(channel_names)
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_profiles_lock_biological_anchor_and_raw_index(self):
+        chr3 = experiment_profiles.get_profile("chr3_sites_2_3_4")
+        dsb = experiment_profiles.get_profile("dsb_53bp1_site1_site2")
+        self.assertEqual(chr3.anchor_channel, "green")
+        self.assertEqual(chr3.anchor.raw_index, 2)
+        self.assertEqual(chr3.anchor.site_id, "site2")
+        self.assertEqual(dsb.anchor_channel, "purple")
+        self.assertEqual(dsb.anchor.raw_index, 2)
+        self.assertEqual(dsb.anchor.site_id, "site2")
+
+    def test_profiles_reject_each_others_channel_contract(self):
+        chr3 = experiment_profiles.get_profile("chr3_sites_2_3_4")
+        dsb = experiment_profiles.get_profile("dsb_53bp1_site1_site2")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            chr3_crop = root / (
+                "U2OS_chr3_195M-488+195.7M-565+198M-647_cell1.tif"
+            )
+            dsb_crop = root / "LiveFISH_DSB014_cell1.tif"
+            tifffile.imwrite(
+                chr3_crop,
+                np.zeros((2, 4, 4, 4), dtype=np.uint16),
+                imagej=True,
+                metadata={"axes": "TCYX"},
+            )
+            tifffile.imwrite(
+                dsb_crop,
+                np.zeros((2, 3, 4, 4), dtype=np.uint16),
+                imagej=True,
+                metadata={"axes": "TCYX"},
+            )
+            self._sidecar(
+                chr3_crop,
+                ["SDC 405 BP1 MH", "SDC 640 LP1 MH", "SDC 488 BP1 MH", "SDC 561 BP1 MH"],
+            )
+            self._sidecar(
+                dsb_crop,
+                ["CF GFP SINGLE1_YZ", "CF RFP SINGLE1_yz", "CF Cy5 SINGLE_YZ"],
+            )
+            self.assertEqual(chr3.validate_crop(chr3_crop)["channel_count"], 4)
+            self.assertEqual(dsb.validate_crop(dsb_crop)["channel_count"], 3)
+            with self.assertRaises(ValueError):
+                chr3.validate_crop(dsb_crop)
+            with self.assertRaises(ValueError):
+                dsb.validate_crop(chr3_crop)
+
+    def test_chr3_profile_rejects_wrong_raw_channel_order(self):
+        profile = experiment_profiles.get_profile("chr3_sites_2_3_4")
+        with tempfile.TemporaryDirectory() as directory:
+            crop = Path(directory) / "U2OS_chr3_195M-488+195.7M-565+198M-647_cell1.tif"
+            tifffile.imwrite(
+                crop,
+                np.zeros((2, 4, 4, 4), dtype=np.uint16),
+                imagej=True,
+                metadata={"axes": "TCYX"},
+            )
+            self._sidecar(
+                crop,
+                ["SDC 405 BP1 MH", "SDC 488 BP1 MH", "SDC 640 LP1 MH", "SDC 561 BP1 MH"],
+            )
+            with self.assertRaisesRegex(ValueError, "raw C1"):
+                profile.validate_crop(crop)
 
 
 class MaxStepModelTests(unittest.TestCase):
@@ -79,6 +163,8 @@ class MaskAssociationTests(unittest.TestCase):
 class BaselineSelectionTests(unittest.TestCase):
     @staticmethod
     def _candidate(path: Path, allele: int, locus: int, channel: str, number: int, points: int, span: int, first: int) -> dict:
+        profile = experiment_profiles.get_profile("dsb_53bp1_site1_site2")
+        spec = profile.channel_from_prefix(channel)
         with path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(["frame", "x_nm", "y_nm"])
@@ -87,7 +173,14 @@ class BaselineSelectionTests(unittest.TestCase):
             "allele_index": allele,
             "anchor_locus": locus,
             "channel": channel,
-            "marker": run_anchor_roi_spt.MARKER[channel],
+            "experiment_profile": profile.name,
+            "corrected_channel": spec.corrected_channel,
+            "raw_channel_index": spec.raw_index,
+            "marker": spec.marker,
+            "marker_slug": spec.marker_slug,
+            "site_id": spec.site_id,
+            "genomic_locus": spec.genomic_locus,
+            "fluorophore": spec.fluorophore,
             "candidate_number": number,
             "candidate_csv": str(path),
             "points": points,
@@ -110,7 +203,10 @@ class BaselineSelectionTests(unittest.TestCase):
                 self._candidate(root / "p3.csv", 1, 2, "P", 3, 9, 20, 1),
             ]
             selected, audit = run_anchor_roi_spt.select_longest_baselines(
-                rows, root / "baseline", [(1, 2), (2, 5)]
+                rows,
+                root / "baseline",
+                [(1, 2), (2, 5)],
+                experiment_profiles.get_profile("dsb_53bp1_site1_site2"),
             )
             self.assertEqual(len(selected), 1)
             self.assertTrue(selected[0]["candidate_csv"].endswith("p2.csv"))

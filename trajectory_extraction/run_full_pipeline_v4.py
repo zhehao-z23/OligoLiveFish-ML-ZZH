@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run v4.0.0 anchor-defined irregular-ROI SPT for one cropped cell TIFF."""
+"""Run v4.1 profile-locked irregular-ROI SPT for one cropped cell TIFF."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ PIPELINE = HERE / "pipeline"
 sys.path.insert(0, str(PIPELINE))
 
 import align_microsam_mask
+import experiment_profiles
 import fiji_preprocess
 
 
@@ -26,7 +27,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-VERSION = "v4.0.0-anchor-roi"
+VERSION = "v4.1.0-experiment-profiles"
 STAGE1 = PIPELINE / "auto_roi_for_published_v2.13.py"
 SPT = PIPELINE / "run_anchor_roi_spt.py"
 PYTHON_QC = PIPELINE / "visualize_anchor_roi_results.py"
@@ -85,9 +86,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--matlab-bin", default="matlab")
     parser.add_argument("--matlab-workers", type=int, choices=(1, 2, 3), default=1)
     parser.add_argument("--matlab-save-filter-images", action="store_true")
-    parser.add_argument("--anchor-channel", choices=("green", "red", "purple"), default="purple")
-    parser.add_argument("--mask-alignment-channel", choices=("auto", "nucleus", "green"), default="auto")
-    parser.add_argument("--raw-alignment-channel-index", type=int)
+    parser.add_argument(
+        "--experiment-profile",
+        choices=experiment_profiles.profile_choices(),
+        required=True,
+        help="Required locked biological channel contract; it determines the anchor automatically.",
+    )
     parser.add_argument("--mask-dilation-px", type=int, default=5)
     parser.add_argument("--roi-dilation-px", type=int, default=5)
     parser.add_argument("--d-star", type=float, default=4.1e-3)
@@ -123,7 +127,10 @@ def main() -> None:
     args = parse_args()
     started = datetime.now()
     crop_tiff, analysis_dir, run_fiji_now = resolve_inputs(args)
-    results_dir = analysis_dir / "anchor_roi_v4"
+    profile = experiment_profiles.get_profile(args.experiment_profile)
+    profile_validation = profile.validate_crop(crop_tiff)
+    anchor_channel = profile.anchor_channel
+    results_dir = analysis_dir / f"anchor_roi_v4_{profile.name}"
     results_dir.mkdir(parents=True, exist_ok=True)
     for name in (
         "mask_alignment",
@@ -148,6 +155,9 @@ def main() -> None:
         "crop_tiff": str(crop_tiff),
         "analysis_dir": str(analysis_dir),
         "results_dir": str(results_dir),
+        "experiment_profile": profile.name,
+        "profile_contract": profile.to_manifest(),
+        "profile_validation": profile_validation,
         "python_executable": sys.executable,
         "options": vars(args),
     }
@@ -163,6 +173,11 @@ def main() -> None:
             print(f"Crop TIFF         : {crop_tiff}")
             print(f"Analysis dir      : {analysis_dir}")
             print(f"Results dir       : {results_dir}")
+            print(f"Experiment profile: {profile.name}")
+            print(
+                f"Locked anchor      : {anchor_channel} / raw C{profile.anchor.raw_index} / "
+                f"{profile.anchor.marker}"
+            )
 
             if run_fiji_now:
                 fiji_preprocess.run_fiji(crop_tiff, args.fiji_bin)
@@ -170,11 +185,8 @@ def main() -> None:
             nucleus_tiff = fiji_preprocess.one_nucleus_tiff(analysis_dir)
 
             mask_source = args.microsam_mask.resolve() if args.microsam_mask else align_microsam_mask.discover_microsam_mask(crop_tiff)
-            if args.mask_alignment_channel == "auto":
-                alignment_channel, inferred_index = align_microsam_mask.infer_alignment_channel(crop_tiff)
-            else:
-                alignment_channel, inferred_index = args.mask_alignment_channel, 0
-            raw_index = args.raw_alignment_channel_index if args.raw_alignment_channel_index is not None else inferred_index
+            alignment_channel = profile.alignment_channel
+            raw_index = profile.alignment_raw_index
             corrected_tiff = align_microsam_mask.corrected_channel_path(analysis_dir, alignment_channel)
             alignment = align_microsam_mask.align_mask(
                 crop_tiff,
@@ -192,7 +204,7 @@ def main() -> None:
                 str(STAGE1),
                 str(nucleus_tiff),
                 "--reference-channel",
-                args.anchor_channel,
+                anchor_channel,
                 "--nucleus-mask",
                 str(aligned_mask),
                 "--output-dir",
@@ -209,8 +221,8 @@ def main() -> None:
                 str(aligned_mask),
                 "--output-dir",
                 str(results_dir),
-                "--anchor-channel",
-                args.anchor_channel,
+                "--experiment-profile",
+                profile.name,
                 "--roi-dilation-px",
                 str(args.roi_dilation_px),
                 "--matlab-bin",

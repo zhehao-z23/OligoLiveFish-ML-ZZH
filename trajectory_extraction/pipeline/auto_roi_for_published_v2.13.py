@@ -868,7 +868,10 @@ def main():
         "--reference-channel",
         choices=CHANNELS,
         default="purple",
-        help="Anchor channel for Stage 1 (v4 default: purple); the other two channels are targets.",
+        help=(
+            "Legacy standalone Stage-1 anchor (default: purple). Production v4.1 "
+            "always supplies the locked anchor from its experiment profile."
+        ),
     )
     parser.add_argument(
         "--nucleus-mask",

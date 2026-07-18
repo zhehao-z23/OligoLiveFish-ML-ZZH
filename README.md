@@ -1,6 +1,6 @@
 # OligoLiveFish: ND2 to cleaned SPT trajectories
 
-Current production version: **v4.0.0-anchor-roi**.
+Current production version: **v4.1.0-experiment-profiles**.
 
 This repository converts a time-lapse Oligo-LiveFISH ND2 acquisition into
 single-cell, sub-pixel trajectories. The documented scope ends at trajectory
@@ -12,7 +12,7 @@ ND2
   -> multi-channel single-cell TIFF + exact micro-SAM mask association
   -> Fiji drift correction and channel separation
   -> drift-aligned micro-SAM nucleus support
-  -> Purple anchor trajectories
+  -> experiment-profile-locked anchor trajectories
   -> one static irregular ROI per accepted anchor
   -> ROI-restricted G/R/P 2-D Gaussian SPT
   -> deterministic longest-track cleaned baseline
@@ -36,15 +36,29 @@ Python dependencies are pinned in
 [requirements_nd2_to_traj.txt](requirements_nd2_to_traj.txt). The complete venv
 guide is [REQUIREMENTS_ND2_TO_TRAJ.md](REQUIREMENTS_ND2_TO_TRAJ.md).
 
-## Data contract
+## Locked experiment profiles
 
 The ND2 must normalize to `T,Z,C,Y,X` and contain calibrated pixel size and
-frame interval metadata. Supported channel orders are:
+frame interval metadata. Every trajectory command requires exactly one of the
+two profiles below; the profile validates the crop before Fiji/MATLAB starts,
+sets the biological labels, and locks the anchor. There is no free-form anchor
+override.
 
-| Acquisition | C0 | C1 | C2 | C3 |
-| --- | --- | --- | --- | --- |
-| Four-channel | nucleus | red/Site 1 | green/53BP1 | purple/Site 2 |
-| Three-channel | green/53BP1 | red/Site 1 | purple/Site 2 | — |
+| Profile | C0 | C1 | C2 | C3 | Locked anchor |
+| --- | --- | --- | --- | --- | --- |
+| `chr3_sites_2_3_4` | Hoechst nucleus | Site 4, chr3:198M, A647 | Site 2, chr3:195M, A488 | Site 3, chr3:195.7M, A565 | C2 / green / Site 2 |
+| `dsb_53bp1_site1_site2` | 53BP1 / green | Site 1 / yellow | Site 2 / purple | — | C2 / purple / Site 2 |
+
+Although the biological meanings differ, both profiles deliberately lock raw
+zero-based channel `C2` as the anchor. The four-channel Chr3 profile requires
+the filename evidence `chr3`, `195M`, `195.7M`, `198M`, `488`, `565`, and `647`.
+The three-channel DSB profile requires `DSB` or `53BP1` in the filename. A
+channel-count or filename mismatch is a hard error.
+
+The Step-3 `*_metadata.json` sidecar is also mandatory. Profile validation
+checks the original ND2 channel-name order: `405/640/488/561` for the Chr3
+profile and `GFP/RFP/Cy5` for the DSB profile. The TIFF channel count, sidecar
+count, raw indices, and source-name evidence must all agree.
 
 All G/R/P channels must have the same frame count, frame interval, pixel size,
 and corrected image shape. A different acquisition order requires editing the
@@ -182,7 +196,8 @@ To export all already-QC-approved FOVs, pass `$CropRoot` instead.
 
 ## Step 4 — run v4 on one cell
 
-Use a real TIFF written by Step 3. Purple is the locked default anchor.
+Use a real TIFF written by Step 3 and explicitly select its biological profile.
+For the manuscript Chr3 batch, Site 2 / A488 / raw C2 is locked automatically.
 
 ```powershell
 $CropTif = "$FovCropDir\<ND2_stem>_<N>.tif"       # REPLACE
@@ -193,7 +208,7 @@ $Analysis = [System.IO.Path]::ChangeExtension($CropTif, $null)
   --fiji-bin $Fiji `
   --matlab-bin $Matlab `
   --matlab-workers 1 `
-  --anchor-channel purple
+  --experiment-profile chr3_sites_2_3_4
 ```
 
 Do not create `$Analysis`; Fiji and the runner create it beside the crop TIFF.
@@ -206,7 +221,7 @@ ASCII directory link. The TIFF filename itself must be ASCII and retain `.tif`.
 2. The crop-associated micro-SAM instance mask is aligned independently to
    every Fiji-corrected frame using phase correlation and dilated by 5 px.
 3. Stage 1 receives that aligned mask through `--nucleus-mask`; it does not
-   replace it with Otsu. A Purple anchor is rejected when more than 10% of its
+   replace it with Otsu. The profile-locked anchor is rejected when more than 10% of its
    checkable positions are outside the mask.
 4. For every retained anchor, its complete path is rasterized into one connected
    centerline, dilated by 5 px, intersected with frame 1 of the aligned/dilated
@@ -251,10 +266,8 @@ sensitivity values but are **not** silently applied.
 | `--matlab-bin` | `matlab` | MATLAB executable/command. |
 | `--matlab-workers` | `1` | Concurrent G/R/P MATLAB groups (`1`–`3`). |
 | `--matlab-save-filter-images` | off | Retain large filtered movies in MAT files. |
-| `--anchor-channel` | `purple` | Anchor channel; v4 validated default is Purple. |
+| `--experiment-profile` | required | `chr3_sites_2_3_4` or `dsb_53bp1_site1_site2`; locks channel identity and anchor. |
 | `--microsam-mask` | associated mask | Explicit mask override; normally do not use. |
-| `--mask-alignment-channel` | `auto` | Four-channel: nucleus; three-channel: green. |
-| `--raw-alignment-channel-index` | inferred | Explicit zero-based raw channel for alignment. |
 | `--mask-dilation-px` | `5` | Expansion after drift alignment. |
 | `--roi-dilation-px` | `5` | Anchor centerline expansion; minimum `5`. |
 | `--d-star` | `0.0041` | Anomalous diffusion prior in `um^2/s^alpha`. |
@@ -268,7 +281,7 @@ sensitivity values but are **not** silently applied.
 | `--crop-tif` | inferred | Original crop for `--no-fiji` when `<analysis>.tif` is unavailable. |
 
 Changing a scientific parameter requires a fresh run and a recorded reason.
-The runner removes only its own generated `anchor_roi_v4` subdirectories before
+The runner removes only its own generated profile-namespaced v4 subdirectories before
 a rerun; archive a completed result first if it must be retained.
 
 ## Step 5 — inspect automatic QC and cleaned baselines
@@ -276,12 +289,12 @@ a rerun; archive a completed result first if it must be retained.
 Step 4 generates QC automatically. No review script is required.
 
 ```text
-$Analysis\anchor_roi_v4\figures\python_spatial_qc\
+$Analysis\anchor_roi_v4_<experiment_profile>\figures\python_spatial_qc\
   01_anchor_mask_roi_overview.png
   02_all_candidates_fixed_coordinates.png
   03_candidate_length_and_baseline.png
 
-$Analysis\anchor_roi_v4\figures\matlab_longest\
+$Analysis\anchor_roi_v4_<experiment_profile>\figures\matlab_longest\
   allele_<N>_<marker>_longest_spt.png
   allele_<N>_<marker>_longest_spt.svg
 ```
@@ -298,7 +311,7 @@ the trajectory from becoming black during vector export.
 
 Before batching, verify:
 
-- the accepted Purple anchors lie inside the biological nucleus;
+- the accepted profile-locked anchors lie inside the biological nucleus/support;
 - each static ROI follows one anchor and is a single connected component;
 - candidate trajectories lie inside their ROI and on visible signal;
 - the longest baseline is biologically plausible, not merely long;
@@ -316,21 +329,23 @@ $Stem = "<ND2_stem>"                              # REPLACE
   --crop-glob "$Stem`_*.tif" `
   --fiji-bin $Fiji `
   --matlab-bin $Matlab `
-  --anchor-channel purple `
+  --experiment-profile chr3_sites_2_3_4 `
   --cell-workers 1 `
   --matlab-workers 1 `
   --dry-run
 ```
 
-Every accepted crop must be a 3/4-channel `TCYX` or `TZCYX` TIFF and must have
-an associated micro-SAM mask. Remove `--dry-run` after the list is correct.
+Every accepted crop must be a `TCYX` or `TZCYX` TIFF with the exact channel
+count required by the selected profile (four for Chr3 sites 2/3/4; three for
+DSB/53BP1) and an associated micro-SAM mask. Remove `--dry-run` after the list
+is correct.
 
 `--resume` is enabled by default and skips only a completed v4 manifest with
 the same scientific and MATLAB-worker settings. The batch writes
-`trajectory_batch_v4_summary.csv`. Peak MATLAB processes equal
+`trajectory_batch_v4_<experiment_profile>_summary.csv`. Peak MATLAB processes equal
 `cell-workers × matlab-workers`; start with only one parallel dimension above 1.
 
-The batch runner exposes the same anchor, mask/ROI dilation, max-step model,
+The batch runner exposes the same profile, mask/ROI dilation, max-step model,
 explicit max-step override, MATLAB filter-image, Fiji, and MATLAB options as the
 single-cell runner, plus `--crop-glob`, `--cell-workers`, `--resume/--no-resume`,
 and `--dry-run`.
@@ -346,7 +361,7 @@ and `--dry-run`.
   <cell>_green.tif
   <cell>_red.tif
   <cell>_purple.tif
-  anchor_roi_v4\
+  anchor_roi_v4_<experiment_profile>\
     run_manifest.json
     log_anchor_roi_v4.txt
     mask_alignment\
@@ -357,8 +372,8 @@ and `--dry-run`.
       microsam_mask_alignment_qc.png
     anchor_stage1\
       Nucleus_masks.tif
-      RoiSet_purple.zip
-      P_loci<N>_traj_rela2wholeimg.csv
+      RoiSet_<profile-locked-anchor>.zip
+      <anchor-prefix>_loci<N>_traj_rela2wholeimg.csv
     static_union_rois\
       allele_<N>_loci<M>_static_anchor_roi.tif
     roi_spt\
@@ -392,7 +407,8 @@ longest-track rule; it does not mean old reference-distance matching.
 | Crop path has no `.tif` | Use the Step 3 TIFF, not the analysis directory, JSON, or mask. |
 | No associated micro-SAM mask | Rerun Steps 1 and 3 with v4, or pass the verified exact mask with `--microsam-mask`. |
 | Anchor appears outside the nucleus | Inspect `mask_alignment_qc.png` and `drift_alignment.csv`; never substitute Otsu output. |
-| No Purple anchor remains | Inspect segmentation/alignment and signal. Do not bypass the mask merely to create output. |
+| No profile-locked anchor remains | Inspect segmentation/alignment and signal. Do not bypass the mask merely to create output. |
+| Profile validation fails | Stop. Confirm the acquisition, channel count, and filename evidence; never choose the other profile merely to make the job run. |
 | ROI has more than one component | The run stops; inspect the anchor coordinates and mask intersection. |
 | Fiji fails on a Chinese path | Use `run_full_pipeline_v4.py`; it creates the temporary ASCII parent-path bridge. Keep the filename ASCII. |
 | No `*_Nucleus.tif` | Fiji failed before channel export; inspect the log and Correct 3D drift installation. |

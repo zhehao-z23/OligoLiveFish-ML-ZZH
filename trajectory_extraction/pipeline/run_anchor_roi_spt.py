@@ -22,6 +22,7 @@ from scipy import ndimage
 from skimage.draw import line
 
 import max_step_model
+import experiment_profiles
 
 
 for _stream in (sys.stdout, sys.stderr):
@@ -29,12 +30,11 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-VERSION = "v4.0.0-anchor-roi"
+VERSION = "v4.1.0-experiment-profiles"
 HERE = Path(__file__).resolve().parent
 MATLAB_DEPS = HERE / "matlab_deps"
 CHANNELS = ("green", "red", "purple")
 PREFIX = {"green": "G", "red": "R", "purple": "P"}
-MARKER = {"G": "53BP1", "R": "Site 1 (Yellow)", "P": "Site 2 (Purple)"}
 GAUSSIAN_FIT_BOX_SIZE_PX = 9
 MIN_ROI_DILATION_PX = math.ceil(GAUSSIAN_FIT_BOX_SIZE_PX / 2)
 
@@ -284,6 +284,7 @@ def candidate_audit(
     channel: str,
     roi: np.ndarray,
     pixel_size_nm: float,
+    profile: experiment_profiles.ExperimentProfile,
 ) -> dict:
     points = read_candidate_nm(path)
     frames = np.asarray([point[0] for point in points], dtype=int)
@@ -297,11 +298,19 @@ def candidate_audit(
         inside.append(0 <= yi < roi.shape[0] and 0 <= xi < roi.shape[1] and bool(roi[yi, xi]))
     span = int(frames[-1] - frames[0] + 1)
     trajectory_match = re.search(r"traj(\d+)", path.stem)
+    channel_spec = profile.channel_from_prefix(channel)
     return {
+        "experiment_profile": profile.name,
         "allele_index": allele_index,
         "anchor_locus": anchor_locus,
         "channel": channel,
-        "marker": MARKER[channel],
+        "corrected_channel": channel_spec.corrected_channel,
+        "raw_channel_index": channel_spec.raw_index,
+        "marker": channel_spec.marker,
+        "marker_slug": channel_spec.marker_slug,
+        "site_id": channel_spec.site_id,
+        "genomic_locus": channel_spec.genomic_locus,
+        "fluorophore": channel_spec.fluorophore,
         "candidate_number": int(trajectory_match.group(1)) if trajectory_match else 0,
         "candidate_csv": str(path.resolve()),
         "points": len(points),
@@ -322,7 +331,10 @@ def longest_sort_key(row: dict) -> tuple:
 
 
 def select_longest_baselines(
-    candidate_rows: list[dict], baseline_dir: Path, allele_anchors: list[tuple[int, int]]
+    candidate_rows: list[dict],
+    baseline_dir: Path,
+    allele_anchors: list[tuple[int, int]],
+    profile: experiment_profiles.ExperimentProfile,
 ) -> tuple[list[dict], list[dict]]:
     baseline_dir.mkdir(parents=True, exist_ok=True)
     for stale in baseline_dir.glob("*.csv"):
@@ -331,6 +343,7 @@ def select_longest_baselines(
     audit_rows = []
     for allele_index, anchor_locus in allele_anchors:
         for channel in PREFIX.values():
+            channel_spec = profile.channel_from_prefix(channel)
             pool = [
                 row
                 for row in candidate_rows
@@ -339,10 +352,17 @@ def select_longest_baselines(
             if not pool:
                 audit_rows.append(
                     {
+                        "experiment_profile": profile.name,
                         "allele_index": allele_index,
                         "anchor_locus": anchor_locus,
                         "channel": channel,
-                        "marker": MARKER[channel],
+                        "corrected_channel": channel_spec.corrected_channel,
+                        "raw_channel_index": channel_spec.raw_index,
+                        "marker": channel_spec.marker,
+                        "marker_slug": channel_spec.marker_slug,
+                        "site_id": channel_spec.site_id,
+                        "genomic_locus": channel_spec.genomic_locus,
+                        "fluorophore": channel_spec.fluorophore,
                         "candidate_count": 0,
                         "selection_status": "no candidate; no baseline output",
                         "selected_candidate_csv": "",
@@ -353,9 +373,8 @@ def select_longest_baselines(
                 )
                 continue
             selected = sorted(pool, key=longest_sort_key)[0]
-            marker_slug = {"G": "53bp1", "R": "site1", "P": "site2"}[channel]
             destination = baseline_dir / (
-                f"allele_{allele_index:03d}_{marker_slug}_longest_spt_cleaned.csv"
+                f"allele_{allele_index:03d}_{channel_spec.marker_slug}_longest_spt_cleaned.csv"
             )
             shutil.copy2(selected["candidate_csv"], destination)
             baseline = {
@@ -367,10 +386,17 @@ def select_longest_baselines(
             selected_rows.append(baseline)
             audit_rows.append(
                 {
+                    "experiment_profile": profile.name,
                     "allele_index": allele_index,
                     "anchor_locus": anchor_locus,
                     "channel": channel,
-                    "marker": MARKER[channel],
+                    "corrected_channel": channel_spec.corrected_channel,
+                    "raw_channel_index": channel_spec.raw_index,
+                    "marker": channel_spec.marker,
+                    "marker_slug": channel_spec.marker_slug,
+                    "site_id": channel_spec.site_id,
+                    "genomic_locus": channel_spec.genomic_locus,
+                    "fluorophore": channel_spec.fluorophore,
                     "candidate_count": len(pool),
                     "selection_status": "selected longest baseline",
                     "selected_candidate_csv": selected["candidate_csv"],
@@ -388,7 +414,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--anchor-dir", type=Path, required=True)
     parser.add_argument("--aligned-microsam-mask", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--anchor-channel", choices=CHANNELS, default="purple")
+    parser.add_argument(
+        "--experiment-profile",
+        choices=experiment_profiles.profile_choices(),
+        required=True,
+    )
     parser.add_argument("--roi-dilation-px", type=int, default=5)
     parser.add_argument("--matlab-bin", default="matlab")
     parser.add_argument("--matlab-workers", type=int, choices=(1, 2, 3), default=1)
@@ -405,6 +435,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    profile = experiment_profiles.get_profile(args.experiment_profile)
+    anchor_channel = profile.anchor_channel
     analysis_dir = args.analysis_dir.resolve()
     anchor_dir = args.anchor_dir.resolve()
     output_dir = args.output_dir.resolve() if args.output_dir else analysis_dir / "anchor_roi_v4"
@@ -463,7 +495,7 @@ def main() -> None:
             f"Aligned mask YX shape {aligned_mask.shape[1:]} does not match "
             f"corrected channel TIFF YX shape {yx_shape}"
         )
-    prefix = PREFIX[args.anchor_channel]
+    prefix = PREFIX[anchor_channel]
     anchor_paths = sorted(anchor_dir.glob(f"{prefix}_loci*_traj_rela2wholeimg.csv"), key=locus_number)
     if not anchor_paths:
         raise RuntimeError(f"No {prefix} anchor trajectories found in {anchor_dir}")
@@ -486,7 +518,13 @@ def main() -> None:
             {
                 "allele_index": allele_index,
                 "anchor_locus": anchor_locus,
-                "anchor_channel": args.anchor_channel,
+                "experiment_profile": profile.name,
+                "anchor_channel": anchor_channel,
+                "anchor_raw_channel_index": profile.anchor.raw_index,
+                "anchor_marker": profile.anchor.marker,
+                "anchor_site_id": profile.anchor.site_id,
+                "anchor_genomic_locus": profile.anchor.genomic_locus,
+                "anchor_fluorophore": profile.anchor.fluorophore,
                 "anchor_csv": str(anchor_path.resolve()),
                 "anchor_points": len(anchor),
                 "roi_dilation_px": args.roi_dilation_px,
@@ -531,6 +569,7 @@ def main() -> None:
                     channel=path.name[0],
                     roi=roi,
                     pixel_size_nm=pixel_size_nm,
+                    profile=profile,
                 )
             )
 
@@ -538,7 +577,7 @@ def main() -> None:
         (row["allele_index"], row["anchor_locus"]) for row in roi_rows
     ]
     selected_rows, selection_audit = select_longest_baselines(
-        candidate_rows, baseline_dir, allele_anchors
+        candidate_rows, baseline_dir, allele_anchors, profile
     )
     for row in selected_rows:
         row["frame_interval_s"] = metadata["frame_interval_s"]
@@ -551,9 +590,13 @@ def main() -> None:
 
     summary = {
         "version": VERSION,
+        "experiment_profile": profile.name,
+        "profile_contract": profile.to_manifest(),
         "analysis_dir": str(analysis_dir),
         "output_dir": str(output_dir),
-        "anchor_channel": args.anchor_channel,
+        "anchor_channel": anchor_channel,
+        "anchor_raw_channel_index": profile.anchor.raw_index,
+        "anchor_marker": profile.anchor.marker,
         "anchor_count": len(anchor_paths),
         "static_irregular_roi_rule": "complete anchor path connected, dilated, intersected with frame-1 aligned micro-SAM support, reused for every frame",
         "roi_dilation_px": args.roi_dilation_px,

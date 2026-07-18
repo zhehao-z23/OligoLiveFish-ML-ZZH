@@ -17,11 +17,8 @@ import tifffile
 from matplotlib.colors import LinearSegmentedColormap
 
 import max_step_model
+import experiment_profiles
 from run_anchor_roi_spt import PREFIX, locate_channel_tiffs, read_candidate_nm, read_track_px
-
-
-CHANNEL_COLORS = {"G": "#00A65A", "R": "#F4B400", "P": "#7A3DB8"}
-CHANNEL_NAMES = {"G": "53BP1 (Green)", "R": "Site 1 (Yellow)", "P": "Site 2 (Purple)"}
 
 
 def read_rows(path: Path) -> list[dict]:
@@ -31,8 +28,8 @@ def read_rows(path: Path) -> list[dict]:
         return list(csv.DictReader(handle))
 
 
-def time_cmap(prefix: str) -> LinearSegmentedColormap:
-    color = CHANNEL_COLORS[prefix]
+def time_cmap(prefix: str, channel_colors: dict[str, str]) -> LinearSegmentedColormap:
+    color = channel_colors[prefix]
     return LinearSegmentedColormap.from_list(f"{prefix}_time", ["#E8E8E8", color])
 
 
@@ -93,6 +90,7 @@ def spatial_overview(
     projection: np.ndarray,
     aligned_mask: np.ndarray,
     pixel_size_nm: float,
+    channel_colors: dict[str, str],
 ) -> None:
     if not roi_rows:
         return
@@ -134,7 +132,10 @@ def spatial_overview(
             frames = np.asarray([point[0] for point in points])
             x = np.asarray([point[1] for point in points]) / pixel_size_nm - 1.0
             y = np.asarray([point[2] for point in points]) / pixel_size_nm - 1.0
-            plot_gradient_line(right, x, y, frames, cmap=time_cmap(prefix), linewidth=1.8)
+            plot_gradient_line(
+                right, x, y, frames,
+                cmap=time_cmap(prefix, channel_colors), linewidth=1.8
+            )
         right.set_title(f"Allele {allele}: longest SPT baselines")
         right.set_xlabel("corrected x (px)")
         right.set_ylabel("corrected y (px)")
@@ -149,6 +150,8 @@ def all_candidates_figure(
     baseline_rows: list[dict],
     projections: dict[str, np.ndarray],
     pixel_size_nm: float,
+    channel_names: dict[str, str],
+    channel_colors: dict[str, str],
 ) -> None:
     fig, axes = plt.subplots(1, 3, figsize=(16, 5.2), sharex=True, sharey=True)
     channel_by_prefix = {prefix: channel for channel, prefix in PREFIX.items()}
@@ -167,11 +170,11 @@ def all_candidates_figure(
                 x,
                 y,
                 frames,
-                cmap=time_cmap(prefix),
+                cmap=time_cmap(prefix, channel_colors),
                 linewidth=2.0 if selected else 0.65,
                 alpha=1.0 if selected else 0.30,
             )
-        axis.set_title(f"{CHANNEL_NAMES[prefix]}\n{len(rows)} candidates; longest emphasized")
+        axis.set_title(f"{channel_names[prefix]}\n{len(rows)} candidates; longest emphasized")
         axis.set_xlabel("corrected x (px)")
         axis.set_aspect("equal")
     axes[0].set_ylabel("corrected y (px)")
@@ -180,12 +183,18 @@ def all_candidates_figure(
     plt.close(fig)
 
 
-def length_figure(output: Path, candidate_rows: list[dict], baseline_rows: list[dict]) -> None:
+def length_figure(
+    output: Path,
+    candidate_rows: list[dict],
+    baseline_rows: list[dict],
+    channel_names: dict[str, str],
+    channel_colors: dict[str, str],
+) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
     positions = np.arange(3)
     counts = [sum(row["channel"] == prefix for row in candidate_rows) for prefix in ("G", "R", "P")]
-    axes[0].bar(positions, counts, color=[CHANNEL_COLORS[prefix] for prefix in ("G", "R", "P")])
-    axes[0].set_xticks(positions, ["53BP1", "Site 1", "Site 2"])
+    axes[0].bar(positions, counts, color=[channel_colors[prefix] for prefix in ("G", "R", "P")])
+    axes[0].set_xticks(positions, [channel_names[prefix] for prefix in ("G", "R", "P")])
     axes[0].set_ylabel("candidate trajectories")
     axes[0].set_title("SPT yield inside anchor-defined ROIs")
     for index, value in enumerate(counts):
@@ -195,10 +204,10 @@ def length_figure(output: Path, candidate_rows: list[dict], baseline_rows: list[
         lengths = [int(row["points"]) for row in candidate_rows if row["channel"] == prefix]
         if lengths:
             axes[1].hist(lengths, bins=min(20, max(5, len(set(lengths)))), histtype="step", linewidth=1.8,
-                         color=CHANNEL_COLORS[prefix], label=CHANNEL_NAMES[prefix])
+                         color=channel_colors[prefix], label=channel_names[prefix])
         selected = [int(row["points"]) for row in baseline_rows if row["channel"] == prefix]
         for length in selected:
-            axes[1].axvline(length, color=CHANNEL_COLORS[prefix], linewidth=1.2, alpha=0.7)
+            axes[1].axvline(length, color=channel_colors[prefix], linewidth=1.2, alpha=0.7)
     axes[1].set_xlabel("trajectory length (points)")
     axes[1].set_ylabel("candidate count")
     axes[1].set_title("Candidate lengths; selected longest shown by vertical lines")
@@ -233,6 +242,13 @@ def main() -> None:
     summary = json.loads(
         (results_dir / "anchor_roi_v4_summary.json").read_text(encoding="utf-8")
     )
+    profile = experiment_profiles.get_profile(summary["experiment_profile"])
+    channel_names = {
+        spec.prefix: spec.marker for spec in profile.channels
+    }
+    channel_colors = {
+        spec.prefix: spec.display_color for spec in profile.channels
+    }
     anchor_channel = summary["anchor_channel"]
     if args.aligned_microsam_mask:
         aligned_mask_path = args.aligned_microsam_mask.resolve()
@@ -253,11 +269,22 @@ def main() -> None:
         "all_candidates_fixed_coordinates": output_dir / "02_all_candidates_fixed_coordinates.png",
         "candidate_length_and_baseline": output_dir / "03_candidate_length_and_baseline.png",
     }
-    spatial_overview(outputs["anchor_mask_roi_overview"], roi_rows, baseline_rows, projections[anchor_channel], aligned_mask, pixel_size_nm)
-    all_candidates_figure(outputs["all_candidates_fixed_coordinates"], candidate_rows, baseline_rows, projections, pixel_size_nm)
-    length_figure(outputs["candidate_length_and_baseline"], candidate_rows, baseline_rows)
+    spatial_overview(
+        outputs["anchor_mask_roi_overview"], roi_rows, baseline_rows,
+        projections[anchor_channel], aligned_mask, pixel_size_nm, channel_colors
+    )
+    all_candidates_figure(
+        outputs["all_candidates_fixed_coordinates"], candidate_rows,
+        baseline_rows, projections, pixel_size_nm, channel_names, channel_colors
+    )
+    length_figure(
+        outputs["candidate_length_and_baseline"], candidate_rows,
+        baseline_rows, channel_names, channel_colors
+    )
     manifest = {
         "purpose": "read-only QC; these figures do not change candidate generation or baseline selection",
+        "experiment_profile": profile.name,
+        "channel_names": channel_names,
         "source_tables": {
             "roi": str((audit_dir / "static_anchor_roi_geometry.csv").resolve()),
             "candidates": str((audit_dir / "all_candidate_trajectories.csv").resolve()),
