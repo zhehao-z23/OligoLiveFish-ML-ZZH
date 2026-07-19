@@ -22,5 +22,18 @@ poslist = [10, 10, 1; 100, 100, 2];
 assert(isempty(trajlist));
 assert(isempty(traj));
 
+% Exactly one retained trajectory must be renumbered as ID 1 across every
+% row. The legacy single-track boundary used the penultimate row, leaving the
+% last row with its old ID and making spt_track iterate over missing IDs.
+poslist = [10.0, 10.0, 1; ...
+           10.1, 10.1, 2; ...
+           10.2, 10.2, 3; ...
+           10.3, 10.3, 4];
+[trajlist, traj] = spt_track(sptpara, poslist);
+assert(~isempty(trajlist));
+assert(isequal(unique(trajlist(:,4)), 1));
+assert(numel(traj) == 1);
+assert(traj(1).length == 3);
+
 fprintf('SPT_EMPTY_TRAJECTORY_REGRESSION_OK\n');
 end

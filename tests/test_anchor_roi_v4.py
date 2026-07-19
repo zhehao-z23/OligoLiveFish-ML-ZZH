@@ -36,6 +36,13 @@ class MatlabSptTrackRegressionTests(unittest.TestCase):
         self.assertIn("tracks = res;", guard)
         self.assertIn("return", guard)
 
+    def test_legacy_single_track_boundary_uses_final_row(self):
+        source = (
+            PIPELINE / "matlab_deps" / "track.m"
+        ).read_text(encoding="utf-8")
+        self.assertIn("u = length(newtracks(:,ndat));", source)
+        self.assertNotIn("u = length(newtracks(:,ndat)) -1;", source)
+
     def test_empty_track_guard_covers_both_tracking_branches(self):
         source = (
             PIPELINE / "matlab_deps" / "spt_track.m"

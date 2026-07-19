@@ -27,7 +27,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-VERSION = "v4.1.4-experiment-profiles"
+VERSION = "v4.1.5-experiment-profiles"
 STAGE1 = PIPELINE / "auto_roi_for_published_v2.13.py"
 SPT = PIPELINE / "run_anchor_roi_spt.py"
 PYTHON_QC = PIPELINE / "visualize_anchor_roi_results.py"

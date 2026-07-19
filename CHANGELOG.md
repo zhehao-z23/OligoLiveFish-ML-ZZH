@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.1.5-experiment-profiles — 2026-07-19
+
+- Fix the legacy MATLAB single-track boundary so every row of the only
+  retained trajectory is renumbered consistently as track ID 1.
+- Extend the Sherlock MATLAB regression to cover zero retained trajectories
+  and exactly one retained trajectory without changing scientific parameters.
+
 ## 4.1.4-experiment-profiles — 2026-07-18
 
 - Assign the correctly shaped empty matrix to the declared MATLAB `tracks`

@@ -30,7 +30,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-VERSION = "v4.1.4-experiment-profiles"
+VERSION = "v4.1.5-experiment-profiles"
 HERE = Path(__file__).resolve().parent
 MATLAB_DEPS = HERE / "matlab_deps"
 CHANNELS = ("green", "red", "purple")

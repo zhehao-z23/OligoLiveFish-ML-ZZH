@@ -1137,8 +1137,10 @@ indices = find(newtracks(:,ndat) ~= circshift(newtracks(:,ndat),-1));
         count = length(indices);
         if count > 0
             u = indices;
-        else  
-            u = length(newtracks(:,ndat)) -1;
+        else
+            % A single retained track has no transition between track IDs.
+            % Its boundary is the final row, not the penultimate row.
+            u = length(newtracks(:,ndat));
         end
 
 
