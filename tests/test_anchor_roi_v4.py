@@ -33,6 +33,7 @@ class MatlabSptTrackRegressionTests(unittest.TestCase):
         self.assertLess(guard_start, first_row_access)
         guard = source[guard_start:first_row_access]
         self.assertIn("if isempty(res)", guard)
+        self.assertIn("tracks = res;", guard)
         self.assertIn("return", guard)
 
     def test_empty_track_guard_covers_both_tracking_branches(self):

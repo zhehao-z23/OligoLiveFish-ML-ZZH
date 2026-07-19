@@ -24,7 +24,7 @@ from align_microsam_mask import discover_microsam_mask
 import experiment_profiles
 
 
-VERSION = "v4.1.3-experiment-profiles"
+VERSION = "v4.1.4-experiment-profiles"
 SINGLE_CELL_RUNNER = HERE / "run_full_pipeline_v4.py"
 
 

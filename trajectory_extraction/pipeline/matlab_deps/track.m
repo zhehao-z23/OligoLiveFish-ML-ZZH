@@ -1120,6 +1120,7 @@ res(:,dd+1) = olist(:,2);
 % param.good or cannot be linked within maxdisp. Return the correctly shaped
 % empty matrix before the legacy post-processing indexes its first row.
 if isempty(res)
+    tracks = res;
     return
 end
 

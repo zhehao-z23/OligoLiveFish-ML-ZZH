@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.1.4-experiment-profiles — 2026-07-18
+
+- Assign the correctly shaped empty matrix to the declared MATLAB `tracks`
+  output before the legacy `track.m` empty-result branch returns.
+- Extend the regression contract to prevent an unassigned-output failure while
+  preserving all v4.1.3 tracking parameters and locked experiment profiles.
+
 ## 4.1.3-experiment-profiles — 2026-07-18
 
 - Return an empty matrix from legacy MATLAB `track.m` before its post-processing
