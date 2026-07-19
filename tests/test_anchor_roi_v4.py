@@ -23,6 +23,18 @@ import run_anchor_roi_spt
 
 
 class MatlabSptTrackRegressionTests(unittest.TestCase):
+    def test_legacy_track_returns_empty_before_first_row_access(self):
+        source = (
+            PIPELINE / "matlab_deps" / "track.m"
+        ).read_text(encoding="utf-8")
+        guard_comment = "% No retained tracks is a valid result"
+        guard_start = source.index(guard_comment)
+        first_row_access = source.index("ndat=length(res(1,:));")
+        self.assertLess(guard_start, first_row_access)
+        guard = source[guard_start:first_row_access]
+        self.assertIn("if isempty(res)", guard)
+        self.assertIn("return", guard)
+
     def test_empty_track_guard_covers_both_tracking_branches(self):
         source = (
             PIPELINE / "matlab_deps" / "spt_track.m"

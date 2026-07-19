@@ -1,4 +1,4 @@
-# Trajectory CLI quick reference — v4.1.2 experiment profiles
+# Trajectory CLI quick reference — v4.1.3 experiment profiles
 
 The root [README.md](README.md) is authoritative. Every production trajectory
 run must select exactly one locked biological profile. The anchor is derived

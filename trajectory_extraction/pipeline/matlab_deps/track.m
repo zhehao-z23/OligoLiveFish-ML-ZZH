@@ -1116,6 +1116,13 @@ for j=1:dd
 end
 res(:,dd+1) = olist(:,2);
 
+% No retained tracks is a valid result when all candidates are shorter than
+% param.good or cannot be linked within maxdisp. Return the correctly shaped
+% empty matrix before the legacy post-processing indexes its first row.
+if isempty(res)
+    return
+end
+
 % this is uberize included for simplicity of a single monolithic code
 
 ndat=length(res(1,:));

@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.1.3-experiment-profiles — 2026-07-18
+
+- Return an empty matrix from legacy MATLAB `track.m` before its post-processing
+  indexes the first row when no tracks survive linking or length filtering.
+- Keep the v4.1.2 common `spt_track.m` empty-result handling and validate both
+  layers with the Sherlock MATLAB regression smoke test.
+
 ## 4.1.2-experiment-profiles — 2026-07-18
 
 - Treat an empty MATLAB `track.m` result as a valid zero-trajectory outcome
