@@ -105,6 +105,24 @@ class ExperimentProfileTests(unittest.TestCase):
 
 
 class MaxStepModelTests(unittest.TestCase):
+    def test_escaped_unicode_spatial_unit_is_normalized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "escaped_unit.tif"
+            tifffile.imwrite(
+                path,
+                np.zeros((2, 4, 4), dtype=np.uint16),
+                imagej=True,
+                resolution=(10, 10),
+                metadata={
+                    "axes": "TYX",
+                    "unit": r"\u00b5m",
+                    "finterval": 1.0,
+                },
+            )
+            metadata = max_step_model.read_tracking_metadata(path)
+            self.assertEqual(metadata["spatial_unit"], "um")
+            self.assertEqual(metadata["frame_count"], 2)
+
     def test_fov15_metadata_reproduces_approved_radius(self):
         metadata = {
             "frame_interval_s": 1.0114487409591675,

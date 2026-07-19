@@ -15,7 +15,24 @@ if ~isfolder(outputDir)
     mkdir(outputDir);
 end
 
-manifest = readtable(manifestPath, 'TextType', 'string');
+manifest = readtable(manifestPath, ...
+    'FileType', 'text', ...
+    'Delimiter', ',', ...
+    'TextType', 'string', ...
+    'VariableNamingRule', 'preserve');
+
+fprintf('Baseline manifest variables: %s\n', ...
+    strjoin(string(manifest.Properties.VariableNames), ', '));
+
+requiredVariables = ...
+    ["baseline_csv", "allele_index", "channel", "marker", "frame_interval_s"];
+missingVariables = requiredVariables( ...
+    ~ismember(requiredVariables, string(manifest.Properties.VariableNames)));
+
+if ~isempty(missingVariables)
+    error('Baseline manifest missing required variables: %s', ...
+        strjoin(missingVariables, ', '));
+end
 if isempty(manifest)
     warning('No selected baseline trajectories; no MATLAB figures generated.');
     return;
@@ -54,7 +71,9 @@ for rowIndex = 1:height(manifest)
     % Build a separate figure for SVG so the second export is independent.
     [svgFigure, svgAxis] = build_trajectory_figure(x, y, timeSeconds, ...
         frameInterval, allele, marker, height(trajectory));
-    exportgraphics(svgAxis, fullfile(outputDir, baseName + ".svg"), 'ContentType', 'vector');
+    svgPath = fullfile(outputDir, baseName + ".svg");
+    set(svgFigure, 'PaperPositionMode', 'auto');
+    print(svgFigure, char(svgPath), '-dsvg', '-painters');
     if isgraphics(svgFigure)
         close(svgFigure);
     end

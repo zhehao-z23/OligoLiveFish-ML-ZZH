@@ -43,6 +43,17 @@ mtl = sptpara.mtl;
 max_disp = sptpara.max_disp;
 t_pos = poslist;
 
+% A single time point cannot define a temporal trajectory. Treat this as a
+% valid no-trajectory result instead of calling legacy track.m, which
+% returns without assigning its output in this edge case.
+if size(t_pos, 2) < 3 || numel(unique(t_pos(:,3))) < 2
+    warning('spt_track:noTemporalLink', ...
+        'Particles were detected in fewer than two frames; no linkable trajectories were produced.');
+    trajlist = zeros(0, size(t_pos, 2) + 1);
+    traj = struct([]);
+    return
+end
+
 %% Deal with non-consective frames
 
 

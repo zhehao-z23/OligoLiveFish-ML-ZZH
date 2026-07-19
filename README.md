@@ -1,6 +1,6 @@
 # OligoLiveFish: ND2 to cleaned SPT trajectories
 
-Current production version: **v4.1.0-experiment-profiles**.
+Current production version: **v4.1.1-experiment-profiles**.
 
 This repository converts a time-lapse Oligo-LiveFISH ND2 acquisition into
 single-cell, sub-pixel trajectories. The documented scope ends at trajectory

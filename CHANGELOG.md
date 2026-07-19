@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.1.1-experiment-profiles — 2026-07-18
+
+- Preserved the two locked v4.1 biological experiment profiles while adding
+  three runtime fixes recovered from the audited Sherlock smoke-test clone.
+- Return an explicit empty trajectory result when legacy MATLAB SPT receives
+  detections from fewer than two frames.
+- Normalize literal `\\u00b5`/`\\u03bc` TIFF spatial-unit metadata before the
+  physical max-step validation.
+- Read baseline CSV manifests with an explicit text/CSV contract and export
+  SVG through the MATLAB R2022b-compatible `print -dsvg` path.
+
 ## 4.1.0-experiment-profiles — 2026-07-18
 
 - Added two and only two locked biological acquisition profiles:

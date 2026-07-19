@@ -56,6 +56,7 @@ def read_tracking_metadata(tiff_path: Path) -> dict:
             )
 
         unit = str(imagej.get("unit", ""))
+        unit = re.sub(r"\\u(?:00b5|03bc)", "u", unit, flags=re.IGNORECASE)
         if unit.lower() not in {"micron", "microns", "um", "µm", "μm"}:
             raise ValueError(
                 "TIFF spatial unit must explicitly be microns; "
