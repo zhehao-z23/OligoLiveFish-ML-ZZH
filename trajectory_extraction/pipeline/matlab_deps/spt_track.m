@@ -112,11 +112,6 @@ else
         end
     end
     % modifying trajlist for the trajno
-    if isempty(trajlist);
-        warning('spt_track:noTrajectories','No trajectories could be made')
-        traj = struct('pos',[],'length',0,'frame',0);
-        return
-    end
     trajcount=trajlist(:,4);
     for i=2:size(trajlist,1)
         if trajcount(i)-trajcount(i-1)>0
@@ -125,6 +120,18 @@ else
         end
     end
     trajlist(:,4)=trajlist(:,4)-min(trajlist(:,4))+1;
+end
+
+% track.m can legitimately return no retained trajectories even when
+% detections span multiple frames (for example, when every candidate is
+% shorter than the minimum trajectory length). Handle that result for both
+% the consecutive- and non-consecutive-frame paths before indexing trajlist.
+if isempty(trajlist)
+    warning('spt_track:noTrajectories', ...
+        'No trajectories satisfied the temporal linking criteria.');
+    trajlist = zeros(0, size(t_pos, 2) + 1);
+    traj = struct([]);
+    return
 end
 
 %traj = [];

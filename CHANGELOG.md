@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.1.2-experiment-profiles — 2026-07-18
+
+- Treat an empty MATLAB `track.m` result as a valid zero-trajectory outcome
+  for both consecutive- and non-consecutive-frame inputs.
+- Preserve empty channel/allele results without changing thresholds, minimum
+  trajectory length or other scientific tracking parameters.
+- Add a MATLAB regression smoke test for multi-frame detections that produce
+  no retained trajectories.
+
 ## 4.1.1-experiment-profiles — 2026-07-18
 
 - Preserved the two locked v4.1 biological experiment profiles while adding

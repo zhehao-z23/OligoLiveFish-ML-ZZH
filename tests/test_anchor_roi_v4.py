@@ -22,6 +22,27 @@ import max_step_model
 import run_anchor_roi_spt
 
 
+class MatlabSptTrackRegressionTests(unittest.TestCase):
+    def test_empty_track_guard_covers_both_tracking_branches(self):
+        source = (
+            PIPELINE / "matlab_deps" / "spt_track.m"
+        ).read_text(encoding="utf-8")
+        guard_comment = "% track.m can legitimately return no retained trajectories"
+        guard_start = source.index(guard_comment)
+        struct_start = source.index("n_traj = max(trajlist(:,4));")
+        self.assertLess(guard_start, struct_start)
+        guard = source[guard_start:struct_start]
+        self.assertIn("if isempty(trajlist)", guard)
+        self.assertIn("traj = struct([]);", guard)
+        self.assertIn("return", guard)
+
+    def test_matlab_runtime_regression_script_is_versioned(self):
+        script = ROOT / "tests" / "test_spt_track_no_trajectory.m"
+        source = script.read_text(encoding="utf-8")
+        self.assertIn("SPT_EMPTY_TRAJECTORY_REGRESSION_OK", source)
+        self.assertIn("[10, 10, 1; 100, 100, 2]", source)
+
+
 class ExperimentProfileTests(unittest.TestCase):
     @staticmethod
     def _sidecar(path: Path, channel_names: list[str]) -> None:
