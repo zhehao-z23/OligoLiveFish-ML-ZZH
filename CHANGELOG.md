@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.1.6-experiment-profiles — 2026-07-20
+
+- Fixed the segmented-frame MATLAB SPT path when `track.m` returns no
+  retained trajectories for an individual segment.
+- Return an explicit empty trajectory result before accessing trajectory
+  column 4 when every eligible segment produces no retained trajectory.
+- Preserve completed v4.1.5 results; affected technical failures can be
+  retried through the existing resume workflow.
+
 ## 4.1.5-experiment-profiles — 2026-07-19
 
 - Fix the legacy MATLAB single-track boundary so every row of the only

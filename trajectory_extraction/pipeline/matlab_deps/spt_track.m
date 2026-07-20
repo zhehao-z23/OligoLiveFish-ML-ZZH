@@ -104,6 +104,11 @@ else
                 fprintf(1,['less than ',num2str(mtl),' step traj. \ngoing to the next traj \n'])
                 continue
             end
+            % track.m may legitimately return no retained trajectories.
+            % Skip that segment before indexing the trajectory-ID column.
+            if isempty(Trajlist)
+                continue
+            end
             for j=1:size(Trajlist,1)
                 Trajlist(j,4)=Trajlist(j,4)+count;
             end
@@ -111,6 +116,16 @@ else
             trajlist=vertcat(trajlist,Trajlist);
         end
     end
+    % Every eligible segment may legitimately yield no retained
+    % trajectories. Return an explicit empty result before indexing column 4.
+    if isempty(trajlist)
+        warning('spt_track:noTrajectories', ...
+            'No trajectories satisfied the temporal linking criteria.');
+        trajlist = zeros(0, size(t_pos, 2) + 1);
+        traj = struct([]);
+        return
+    end
+
     % modifying trajlist for the trajno
     trajcount=trajlist(:,4);
     for i=2:size(trajlist,1)
