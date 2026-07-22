@@ -1124,7 +1124,7 @@ def process_file(nd2_path: Path, predictor, segmenter, segment_fn, args):
 
     stem    = nd2_path.stem
     out_dir = (Path(args.output_root) if args.output_root else nd2_path.parent) / stem
-    out_dir.mkdir(exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     viz_dir = out_dir / "visualizations"
     viz_dir.mkdir(exist_ok=True)
 
