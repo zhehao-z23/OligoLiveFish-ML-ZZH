@@ -1,6 +1,6 @@
 # OligoLiveFish: ND2 to cleaned SPT trajectories
 
-Current production version: **v4.1.6-experiment-profiles**.
+Current production version: **v4.2.0-candidate-preserving-qc**.
 
 This repository converts a time-lapse Oligo-LiveFISH ND2 acquisition into
 single-cell, sub-pixel trajectories. The documented scope ends at trajectory
@@ -138,6 +138,59 @@ visualizations\
 Every crop JSON row now records its exact `microsam_mask`. The mask TIFF is a
 repeated `TYX` instance mask, not a new intensity-based segmentation.
 
+### Preserve every raw micro-SAM candidate for manual QC
+
+Candidate preservation is enabled by default. The locked analysis output above
+still contains only filtered masks, while every original micro-SAM instance is
+written to a separate archive so extra candidates cannot leak into analysis.
+You may provide an explicit archive root:
+
+```powershell
+$CandidateRoot = "$Work\01_all_usam_candidates"
+
+& $Python "$Repo\nucleus_segmentation\crop_nuclei_sam.py" $Nd2 `
+  --device auto `
+  --nucleus-channel 0 `
+  --margin 30 `
+  --min-area 1000 `
+  --max-area 200000 `
+  --border-margin 5 `
+  --mask-border-margin 0 `
+  --segmentation-mode apg `
+  --model-type vit_b_lm `
+  --output-root $CropRoot `
+  --preserve-all-candidates `
+  --candidate-output-root $CandidateRoot
+
+& $Python "$Repo\nucleus_segmentation\save_crops.py" $CropRoot
+```
+
+When `--candidate-output-root` is omitted, the default archive is
+`<output-root>_all_usam_candidates`. Use `--no-preserve-all-candidates` only
+when the extra TIFF storage is intentionally not wanted. Running
+`save_crops.py` on the analysis root automatically exports this default sibling
+archive too. If a custom candidate root is supplied, run `save_crops.py` on
+that custom root explicitly.
+
+Each candidate FOV contains `candidate_selection_manifest.csv`. After running
+`save_crops.py` on the candidate root, all raw masks and multi-channel TIFFs are
+preserved, while `default_gate_pass` and
+`exclusion_reasons` record the current QC decision. Set `manual_decision` to
+`include` or `exclude` (or leave it blank to use the default), then create a
+new analysis-safe view:
+
+```powershell
+$SelectedRoot = "$Work\02_manually_selected_candidates_v1"
+& $Python "$Repo\nucleus_segmentation\materialize_candidate_selection.py" `
+  $CandidateRoot $SelectedRoot
+```
+
+The view contains `spt_included` and `spt_excluded` TIFF trees plus an audited
+manifest. Together the two trees contain every candidate exactly once. Run SPT
+only on `spt_included`; both trees contain symlinks, so the candidate archive is
+never moved or deleted. Always use a fresh `$SelectedRoot` after changing
+decisions.
+
 ### Step 1 parameters
 
 | Parameter | Default/tutorial | Meaning |
@@ -153,6 +206,8 @@ repeated `TYX` instance mask, not a new intensity-based segmentation.
 | `--segmentation-mode` | `apg` | `apg` or `amg`. |
 | `--model-type` | `vit_b_lm` | micro-SAM checkpoint. |
 | `--output-root` | ND2 parent | Parent of the automatically created FOV folder. |
+| `--preserve-all-candidates` | enabled | Preserve every raw micro-SAM instance; use `--no-preserve-all-candidates` to disable. |
+| `--candidate-output-root` | `<output-root>_all_usam_candidates` | Optional explicit parent for candidate TIFFs and QC annotations. |
 
 ## Step 2 — inspect nucleus and crop QC
 

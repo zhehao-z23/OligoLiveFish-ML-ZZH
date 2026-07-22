@@ -605,6 +605,197 @@ def sort_masks_spatially(masks):
     return [mask for _, mask in sorted(keyed, key=lambda item: item[0])]
 
 
+def sort_raw_candidates_spatially(raw_masks):
+    """Return ``(raw_label, mask)`` records in stable spatial order."""
+    keyed = []
+    for raw_label, mask in enumerate(raw_masks, start=1):
+        props = regionprops(mask.astype(np.uint8))
+        if props:
+            cy, cx = props[0].centroid
+        else:
+            cy, cx = float("inf"), float("inf")
+        keyed.append(((cy, cx, raw_label), (raw_label, mask)))
+    return [record for _, record in sorted(keyed, key=lambda item: item[0])]
+
+
+def raw_candidate_qc_record(mask, raw_label, candidate_idx, nuc_avg, args):
+    """Annotate one unmodified micro-SAM instance without discarding it.
+
+    These direct, per-mask rules are intentionally annotations only. The locked
+    analysis path may subsequently split, merge, or deduplicate masks, so
+    ``default_gate_pass`` is not claimed to be a one-to-one reconstruction of
+    membership in ``final_masks``.
+    """
+    H, W = nuc_avg.shape
+    props = regionprops(mask.astype(np.uint8))
+    if not props:
+        raise ValueError(f"micro-SAM label {raw_label} produced an empty mask")
+
+    p = props[0]
+    cy, cx = p.centroid
+    rows, cols = np.where(mask)
+    mask_edge_dist = int(min(
+        rows.min(), cols.min(), H - 1 - rows.max(), W - 1 - cols.max()
+    ))
+    metrics = compute_ch0_quality_metrics(mask, nuc_avg)
+    bad_qc = bool(
+        metrics["ch0_contrast"] < BAD_QC_CH0_CONTRAST_MAX
+        and metrics["ch0_boundary_grad"] < BAD_QC_CH0_BOUNDARY_GRAD_MAX
+    )
+
+    reasons = []
+    if p.area < args.min_area:
+        reasons.append("too_small")
+    if p.area > args.max_area * 2:
+        reasons.append("too_large")
+    if (
+        cy < args.border_margin or cy > H - args.border_margin
+        or cx < args.border_margin or cx > W - args.border_margin
+    ):
+        reasons.append("centroid_border")
+    if args.mask_border_margin >= 0 and mask_edge_dist <= args.mask_border_margin:
+        reasons.append("mask_border")
+    if bad_qc:
+        reasons.append("bad_qc")
+
+    return {
+        "candidate_id": f"candidate_{candidate_idx:03d}",
+        "raw_usam_label": int(raw_label),
+        "crop_index": int(candidate_idx),
+        "default_gate_pass": not reasons,
+        "manual_decision": "",
+        "exclusion_reasons": ";".join(reasons),
+        "area": int(p.area),
+        "centroid_y": float(cy),
+        "centroid_x": float(cx),
+        "solidity": float(p.solidity),
+        "circularity": float(circularity(p.area, p.perimeter)),
+        "edge_dist": float(min(cy, cx, H - 1 - cy, W - 1 - cx)),
+        "mask_edge_dist": mask_edge_dist,
+        "low_solidity_split_candidate": bool(p.solidity < MIN_SOLIDITY),
+        "bad_qc": bad_qc,
+        **metrics,
+    }
+
+
+def write_raw_candidate_archive(
+    nd2_path: Path,
+    raw_masks: list,
+    nuc_avg: np.ndarray,
+    fov_shape: tuple,
+    args,
+):
+    """Write every original micro-SAM instance to an isolated crop archive.
+
+    The archive contains cropped mask TIFFs immediately and a crops JSON that
+    ``save_crops.py`` can use to export the corresponding multi-channel TIFFs.
+    It never changes the locked ``final_masks`` analysis output.
+    """
+    if not getattr(args, "preserve_all_candidates", True):
+        return None
+
+    T, _Z, _C, H, W = fov_shape
+    source_stem = nd2_path.stem
+    archive_stem = f"{source_stem}_candidate"
+    if args.candidate_output_root:
+        candidate_root = Path(args.candidate_output_root)
+    elif getattr(args, "output_root", ""):
+        analysis_root = Path(args.output_root)
+        candidate_root = analysis_root.with_name(
+            analysis_root.name + "_all_usam_candidates"
+        )
+    else:
+        candidate_root = nd2_path.parent / "all_usam_candidates"
+    archive_dir = candidate_root / source_stem
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    records = []
+    crops_json = []
+    spatial_candidates = sort_raw_candidates_spatially(raw_masks)
+    all_raw_masks = [mask for _label, mask in spatial_candidates]
+
+    for candidate_idx, (raw_label, mask) in enumerate(spatial_candidates, start=1):
+        record = raw_candidate_qc_record(
+            mask, raw_label, candidate_idx, nuc_avg, args
+        )
+        bbox, suppress = crop_metadata_with_suppression(
+            mask, all_raw_masks, args.margin, (H, W)
+        )
+        # Overlapping raw instances must never suppress the target candidate.
+        suppress &= ~mask
+        r0, r1, c0, c1 = bbox
+        suppress_crop = suppress[r0:r1, c0:c1]
+        sup_rows, sup_cols = np.where(suppress_crop)
+
+        crop_tiff = f"{archive_stem}_{candidate_idx}.tif"
+        mask_tiff = f"{archive_stem}_mask_{candidate_idx}.tif"
+        record["crop_tiff"] = crop_tiff
+        record["mask_tiff"] = mask_tiff
+        record["bbox_r0"] = int(r0)
+        record["bbox_r1"] = int(r1)
+        record["bbox_c0"] = int(c0)
+        record["bbox_c1"] = int(c1)
+        records.append(record)
+
+        crops_json.append({
+            "idx": candidate_idx,
+            "candidate_id": record["candidate_id"],
+            "raw_usam_label": raw_label,
+            "bbox": [int(r0), int(r1), int(c0), int(c1)],
+            "microsam_mask": mask_tiff,
+            "suppression_rows": sup_rows.tolist(),
+            "suppression_cols": sup_cols.tolist(),
+            "default_gate_pass": record["default_gate_pass"],
+            "exclusion_reasons": record["exclusion_reasons"],
+            "ch0_median_inside": record["ch0_median_inside"],
+            "ch0_background_ring_median": record["ch0_background_ring_median"],
+            "ch0_contrast": record["ch0_contrast"],
+            "ch0_boundary_grad": record["ch0_boundary_grad"],
+            "bad_qc": record["bad_qc"],
+        })
+
+        mask_crop = mask[r0:r1, c0:c1].astype(np.uint8) * 255
+        mask_stack = np.repeat(mask_crop[np.newaxis], T, axis=0)
+        tifffile.imwrite(
+            archive_dir / mask_tiff,
+            mask_stack,
+            imagej=True,
+            metadata={"axes": "TYX"},
+        )
+
+    manifest_fields = [
+        "candidate_id", "raw_usam_label", "crop_index", "crop_tiff",
+        "mask_tiff", "default_gate_pass", "manual_decision",
+        "exclusion_reasons", "area", "centroid_y", "centroid_x",
+        "solidity", "circularity", "edge_dist", "mask_edge_dist",
+        "low_solidity_split_candidate", "bad_qc", "ch0_median_inside",
+        "ch0_background_ring_median", "ch0_contrast", "ch0_boundary_grad",
+        "bbox_r0", "bbox_r1", "bbox_c0", "bbox_c1",
+    ]
+    manifest_path = archive_dir / "candidate_selection_manifest.csv"
+    with manifest_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=manifest_fields)
+        writer.writeheader()
+        writer.writerows(records)
+
+    json_path = archive_dir / f"{archive_stem}_crops.json"
+    with json_path.open("w", encoding="utf-8") as f:
+        json.dump({
+            "nd2_path": str(nd2_path.resolve()),
+            "stem": archive_stem,
+            "archive_kind": "raw_usam_candidates",
+            "source_instance_count": len(raw_masks),
+            "crops": crops_json,
+        }, f)
+
+    gate_pass = sum(bool(record["default_gate_pass"]) for record in records)
+    print(
+        f"  Preserved {len(records)} raw micro-SAM candidates -> {archive_dir}/ "
+        f"(direct QC pass={gate_pass}, annotated only)"
+    )
+    return archive_dir
+
+
 def write_cell_id_mapping(out_dir: Path, crops_info: list, image_shape: tuple[int, int]):
     """Write the stable cell ID to crop-file index mapping used by batch tracking."""
     H, W = image_shape
@@ -880,6 +1071,11 @@ def process_file(nd2_path: Path, predictor, segmenter, segment_fn, args):
 
     raw_masks = [segmentation == i for i in range(1, n_inst + 1)]  # label 0 is background — skip it
 
+    # Optional, isolated archive of every unmodified micro-SAM instance. This
+    # is written before any scientific filtering and does not affect the locked
+    # analysis path below.
+    write_raw_candidate_archive(nd2_path, raw_masks, nuc_avg, fov_shape, args)
+
     filtered_masks, stats = filter_masks(
         raw_masks,
         (H, W),
@@ -1046,7 +1242,34 @@ def main():
     parser.add_argument("--model-type",        default="vit_b_lm")
     parser.add_argument("--device",            default="auto", choices=["auto", "cuda", "mps", "cpu"])
     parser.add_argument("--output-root",       default="", help="Optional output parent; defaults to the ND2 parent")
+    parser.add_argument(
+        "--preserve-all-candidates",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Preserve every raw micro-SAM instance in a separate archive "
+            "(default: enabled; use --no-preserve-all-candidates to disable)."
+        ),
+    )
+    parser.add_argument(
+        "--candidate-output-root",
+        default="",
+        help=(
+            "Optional separate output parent for all raw micro-SAM candidates. "
+            "By default, <output-root>_all_usam_candidates is used. Keep this "
+            "outside --output-root so analysis cannot discover candidates twice."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.candidate_output_root and args.output_root:
+        analysis_root = Path(args.output_root).resolve()
+        candidate_root = Path(args.candidate_output_root).resolve()
+        if candidate_root == analysis_root or analysis_root in candidate_root.parents:
+            parser.error(
+                "--candidate-output-root must not equal or be nested under "
+                "--output-root"
+            )
 
     input_path = Path(args.input)
     if input_path.is_dir():

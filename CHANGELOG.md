@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.2.0-candidate-preserving-qc — 2026-07-22
+
+- Preserve every unmodified micro-SAM instance by default in a separate output tree,
+  including its cropped mask, exportable crop JSON and stable candidate ID.
+- Add `candidate_selection_manifest.csv` with direct QC annotations,
+  exclusion reasons and a blank manual-decision field; no candidate is deleted.
+- Materialize `spt_included` and `spt_excluded` TIFF views from default or
+  manual decisions without moving or duplicating archived candidate data.
+- Make the ordinary crop export command automatically export the default
+  sibling candidate archive, ensuring every candidate receives a full TIFF.
+- Keep the locked v4.1.6 filtered analysis output unchanged unless the new
+  candidate archive option is explicitly requested.
+
 ## 4.1.6-experiment-profiles — 2026-07-20
 
 - Fixed the segmented-frame MATLAB SPT path when `track.m` returns no

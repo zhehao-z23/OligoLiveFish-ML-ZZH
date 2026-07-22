@@ -414,6 +414,16 @@ def process_json(json_path: Path):
     return saved
 
 
+def discover_crop_json_files(root: Path, include_sibling_candidates: bool = True):
+    """Find strict crop JSONs and the default sibling candidate archive."""
+    roots = [root]
+    sibling = root.with_name(root.name + "_all_usam_candidates")
+    if include_sibling_candidates and sibling.is_dir():
+        roots.append(sibling)
+        print(f"Including sibling candidate archive: {sibling}")
+    return sorted({path for search_root in roots for path in search_root.rglob("*_crops.json")})
+
+
 """
 main() finds every crops JSON under the input directory and processes each one.
 Inputs:  none (reads command-line arguments)
@@ -424,10 +434,19 @@ def main():
         description="Save TIFFs from crop JSON files produced by crop_nuclei_sam.py")
     parser.add_argument("input",
                         help="directory containing *_crops.json files (searched recursively)")
+    parser.add_argument(
+        "--include-sibling-candidates",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Also export <input>_all_usam_candidates when present (default: "
+            "enabled; use --no-include-sibling-candidates to disable)."
+        ),
+    )
     args = parser.parse_args()
 
     root = Path(args.input)
-    json_files = sorted(root.rglob("*_crops.json"))
+    json_files = discover_crop_json_files(root, args.include_sibling_candidates)
     if not json_files:
         print(f"No *_crops.json files found under {root}", file=sys.stderr)
         sys.exit(1)
