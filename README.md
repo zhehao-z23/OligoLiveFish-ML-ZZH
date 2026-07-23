@@ -191,6 +191,25 @@ only on `spt_included`; both trees contain symlinks, so the candidate archive is
 never moved or deleted. Always use a fresh `$SelectedRoot` after changing
 decisions.
 
+Reproducible server-side policy views can be generated without editing the
+canonical manifest:
+
+```powershell
+& $Python "$Repo\nucleus_segmentation\materialize_candidate_selection.py" `
+  $CandidateRoot "$Work\selection_no_badqc" --policy no_badqc
+
+& $Python "$Repo\nucleus_segmentation\materialize_candidate_selection.py" `
+  $CandidateRoot "$Work\selection_publicationlike" --policy publicationlike
+
+& $Python "$Repo\nucleus_segmentation\materialize_candidate_selection.py" `
+  $CandidateRoot "$Work\selection_all_candidates" --policy all
+```
+
+The policies are nested: `strict` applies every direct QC reason, `no_badqc`
+ignores only `bad_qc`, `publicationlike` ignores `bad_qc` and `mask_border`,
+and `all` sends every archived candidate to `spt_included`. A non-blank
+`manual_decision` always takes precedence.
+
 ### Step 1 parameters
 
 | Parameter | Default/tutorial | Meaning |

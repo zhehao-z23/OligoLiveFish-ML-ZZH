@@ -10,6 +10,8 @@
   manual decisions without moving or duplicating archived candidate data.
 - Make the ordinary crop export command automatically export the default
   sibling candidate archive, ensuring every candidate receives a full TIFF.
+- Add reproducible `strict`, `no_badqc`, `publicationlike`, and `all` policy
+  views so one all-candidate SPT run can support later gate comparisons.
 - Keep the locked v4.1.6 filtered analysis output unchanged unless the new
   candidate archive option is explicitly requested.
 

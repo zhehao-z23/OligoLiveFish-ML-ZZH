@@ -21,8 +21,33 @@ class CandidateSelectionTests(unittest.TestCase):
         )
         self.assertEqual(
             effective_selection({"manual_decision": "", "default_gate_pass": "True"}),
-            (True, "default_qc"),
+            (True, "policy:strict"),
         )
+
+    def test_named_policies_form_nested_candidate_sets(self):
+        row = {
+            "manual_decision": "",
+            "default_gate_pass": "False",
+            "exclusion_reasons": "mask_border;bad_qc",
+        }
+        self.assertEqual(effective_selection(row, "strict")[0], False)
+        self.assertEqual(effective_selection(row, "no_badqc")[0], False)
+        self.assertEqual(effective_selection(row, "publicationlike")[0], True)
+        self.assertEqual(effective_selection(row, "all")[0], True)
+
+    def test_strict_preserves_default_gate_and_all_includes_unknown_reasons(self):
+        legacy_row = {
+            "manual_decision": "",
+            "default_gate_pass": "False",
+            "exclusion_reasons": "",
+        }
+        future_row = {
+            "manual_decision": "",
+            "default_gate_pass": "False",
+            "exclusion_reasons": "future_qc_reason",
+        }
+        self.assertEqual(effective_selection(legacy_row, "strict")[0], False)
+        self.assertEqual(effective_selection(future_row, "all")[0], True)
 
     def test_materialized_view_contains_only_effective_selection(self):
         with tempfile.TemporaryDirectory() as tmp:

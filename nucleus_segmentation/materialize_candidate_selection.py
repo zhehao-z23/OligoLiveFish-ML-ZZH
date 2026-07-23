@@ -2,9 +2,9 @@
 """Materialize an analysis-safe view from preserved micro-SAM candidates.
 
 Edit ``manual_decision`` in each ``candidate_selection_manifest.csv`` using
-``include`` or ``exclude``. A blank value falls back to ``default_gate_pass``.
-This command creates a new tree containing only selected crop/mask symlinks;
-the candidate archive is never modified or moved.
+``include`` or ``exclude``. A blank value is evaluated using the selected QC
+policy. This command creates a new tree containing only selected crop/mask
+symlinks; the candidate archive is never modified or moved.
 """
 
 from __future__ import annotations
@@ -29,18 +29,46 @@ def parse_bool(value: str, *, field: str) -> bool:
     raise ValueError(f"invalid {field} value: {value!r}")
 
 
-def effective_selection(row: dict[str, str]) -> tuple[bool, str]:
+POLICY_IGNORED_REASONS = {
+    "strict": set(),
+    "no_badqc": {"bad_qc"},
+    "publicationlike": {"bad_qc", "mask_border"},
+    "all": {"too_small", "too_large", "centroid_border", "mask_border", "bad_qc"},
+}
+
+
+def effective_selection(row: dict[str, str], policy: str = "strict") -> tuple[bool, str]:
     manual = row.get("manual_decision", "").strip()
     if manual:
         return parse_bool(manual, field="manual_decision"), "manual"
-    return parse_bool(row["default_gate_pass"], field="default_gate_pass"), "default_qc"
+    if policy not in POLICY_IGNORED_REASONS:
+        raise ValueError(f"unknown selection policy: {policy}")
+    if policy == "strict":
+        return (
+            parse_bool(row["default_gate_pass"], field="default_gate_pass"),
+            "policy:strict",
+        )
+    if policy == "all":
+        return True, "policy:all"
+    reasons = {
+        reason.strip()
+        for reason in row.get("exclusion_reasons", "").split(";")
+        if reason.strip()
+    }
+    blocking = reasons - POLICY_IGNORED_REASONS[policy]
+    return not blocking, f"policy:{policy}"
 
 
 def relative_symlink(source: Path, destination: Path) -> None:
     destination.symlink_to(os.path.relpath(source, start=destination.parent))
 
 
-def materialize_manifest(manifest_path: Path, archive_root: Path, output_root: Path) -> dict:
+def materialize_manifest(
+    manifest_path: Path,
+    archive_root: Path,
+    output_root: Path,
+    policy: str = "strict",
+) -> dict:
     relative_fov = manifest_path.parent.relative_to(archive_root)
     included_dir = output_root / "spt_included" / relative_fov
     excluded_dir = output_root / "spt_excluded" / relative_fov
@@ -57,7 +85,7 @@ def materialize_manifest(manifest_path: Path, archive_root: Path, output_root: P
     audited_rows = []
     selected_count = 0
     for row in rows:
-        selected, source = effective_selection(row)
+        selected, source = effective_selection(row, policy)
         row = dict(row)
         row["effective_selected"] = str(selected)
         row["selection_source"] = source
@@ -90,6 +118,7 @@ def materialize_manifest(manifest_path: Path, archive_root: Path, output_root: P
 
     summary = {
         "source_manifest": str(manifest_path.resolve()),
+        "policy": policy,
         "source_candidates": len(rows),
         "selected_candidates": selected_count,
         "excluded_candidates": len(rows) - selected_count,
@@ -106,6 +135,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("candidate_root", type=Path)
     parser.add_argument("output_root", type=Path)
+    parser.add_argument(
+        "--policy",
+        choices=sorted(POLICY_IGNORED_REASONS),
+        default="strict",
+        help=(
+            "QC policy used when manual_decision is blank: strict, no_badqc, "
+            "publicationlike, or all (default: strict)."
+        ),
+    )
     args = parser.parse_args()
 
     candidate_root = args.candidate_root.resolve()
@@ -125,7 +163,8 @@ def main() -> None:
 
     output_root.mkdir(parents=True)
     summaries = [
-        materialize_manifest(path, candidate_root, output_root) for path in manifests
+        materialize_manifest(path, candidate_root, output_root, args.policy)
+        for path in manifests
     ]
     source_total = sum(item["source_candidates"] for item in summaries)
     selected_total = sum(item["selected_candidates"] for item in summaries)
@@ -133,6 +172,7 @@ def main() -> None:
     batch_summary = {
         "candidate_root": str(candidate_root),
         "output_root": str(output_root),
+        "policy": args.policy,
         "fov_count": len(summaries),
         "source_candidates": source_total,
         "selected_candidates": selected_total,
@@ -143,6 +183,7 @@ def main() -> None:
     )
     print(
         f"SELECTION_VIEW_OK fovs={len(summaries)} "
+        f"policy={args.policy} "
         f"source={source_total} selected={selected_total} "
         f"excluded={excluded_total} output={output_root}"
     )
