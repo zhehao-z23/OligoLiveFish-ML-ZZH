@@ -49,10 +49,10 @@ def channel_from_baseline(row: dict[str, str]) -> str:
     ).lower()
     if "site2" in values or "a488" in values or "green" in values:
         return "G"
-    if "site4" in values or "a647" in values or "purple" in values:
-        return "P"
-    if "site3" in values or "a565" in values or "red" in values:
+    if "site4" in values or "a647" in values or "red" in values:
         return "R"
+    if "site3" in values or "a565" in values or "purple" in values:
+        return "P"
     raw = str(row.get("channel", "")).strip().upper()
     return raw if raw in CHANNELS else ""
 
@@ -129,6 +129,11 @@ def legacy_record(task_index: int, task_dir: Path) -> dict:
         "P_baselines": len(by_channel["P"]),
         "R_baselines": len(by_channel["R"]),
         "complete_GPR": all(by_channel[channel] for channel in CHANNELS),
+        "_points": points,
+        **{
+            f"_{channel}_points": by_channel[channel]
+            for channel in CHANNELS
+        },
     }
 
 
@@ -144,6 +149,34 @@ def load_legacy_inventory(task_list: Path) -> list[dict]:
         legacy_record(index, task_dir)
         for index, task_dir in enumerate(tasks, 1)
     ]
+
+
+def apply_legacy_recovery_audit(
+    rows: list[dict],
+    audit_path: Path | None,
+) -> None:
+    if audit_path is None:
+        return
+    audit_rows = read_csv_rows(audit_path)
+    by_index = {
+        int(row["task_index"]): row
+        for row in audit_rows
+    }
+    if set(by_index) != {
+        int(row["legacy_task_index"]) for row in rows
+    }:
+        raise ValueError(
+            "legacy recovery audit and task inventory have different indices"
+        )
+    for row in rows:
+        audit = by_index[int(row["legacy_task_index"])]
+        row["recovery_status"] = audit["status"]
+        if row["outcome"] == "success":
+            continue
+        if audit["status"].startswith("technical_"):
+            row["outcome"] = audit["status"]
+        elif audit["status"].startswith("scientific_"):
+            row["outcome"] = audit["status"]
 
 
 def v4_baselines(row: dict[str, str]) -> tuple[list[int], dict[str, list[int]]]:
@@ -189,6 +222,11 @@ def v4_record(row: dict[str, str]) -> dict:
         "P_baselines": len(by_channel["P"]),
         "R_baselines": len(by_channel["R"]),
         "complete_GPR": all(by_channel[channel] for channel in CHANNELS),
+        "_points": points,
+        **{
+            f"_{channel}_points": by_channel[channel]
+            for channel in CHANNELS
+        },
     }
 
 
@@ -292,6 +330,24 @@ def crosswalk_row(
         "v4_P_baselines": (current or {}).get("P_baselines", ""),
         "legacy_R_baselines": (legacy or {}).get("R_baselines", ""),
         "v4_R_baselines": (current or {}).get("R_baselines", ""),
+        "legacy_G_mean_points": mean_or_none(
+            (legacy or {}).get("_G_points", [])
+        ),
+        "v4_G_mean_points": mean_or_none(
+            (current or {}).get("_G_points", [])
+        ),
+        "legacy_P_mean_points": mean_or_none(
+            (legacy or {}).get("_P_points", [])
+        ),
+        "v4_P_mean_points": mean_or_none(
+            (current or {}).get("_P_points", [])
+        ),
+        "legacy_R_mean_points": mean_or_none(
+            (legacy or {}).get("_R_points", [])
+        ),
+        "v4_R_mean_points": mean_or_none(
+            (current or {}).get("_R_points", [])
+        ),
         "legacy_complete_GPR": (legacy or {}).get("complete_GPR", ""),
         "v4_complete_GPR": (current or {}).get("complete_GPR", ""),
         "v4_raw_strict": (current or {}).get("raw_strict", ""),
@@ -319,9 +375,11 @@ def summarize_records(name: str, rows: list[dict]) -> dict:
             round(100 * len(successful) / len(rows), 2) if rows else None
         ),
         "no_site2_anchor": outcomes["scientific_no_site2_anchor"],
-        "no_selected_baseline": (
-            outcomes["scientific_no_selected_baseline"]
-            + outcomes["scientific_no_cleaned_trajectory"]
+        "no_selected_baseline": sum(
+            count
+            for outcome, count in outcomes.items()
+            if outcome.startswith("scientific_")
+            and outcome != "scientific_no_site2_anchor"
         ),
         "technical_failures": sum(
             count
@@ -353,7 +411,9 @@ def attach_points_to_legacy(rows: list[dict]) -> None:
                     )
                 )
             )
-        row["_points"], _ = summarize_point_files(files)
+        row["_points"], by_channel = summarize_point_files(files)
+        for channel in CHANNELS:
+            row[f"_{channel}_points"] = by_channel[channel]
 
 
 def attach_points_to_v4(
@@ -369,7 +429,9 @@ def attach_points_to_v4(
         raw = by_key[
             (record["cohort"], record["fov"], record["crop_name"])
         ]
-        record["_points"], _ = v4_baselines(raw)
+        record["_points"], by_channel = v4_baselines(raw)
+        for channel in CHANNELS:
+            record[f"_{channel}_points"] = by_channel[channel]
 
 
 def selected_v4_cohorts(
@@ -451,6 +513,41 @@ def paired_summary(crosswalk: list[dict], confidence: str) -> dict:
     }
 
 
+def paired_channel_summary(
+    crosswalk: list[dict],
+    confidence: str,
+    channel: str,
+) -> dict:
+    legacy_mean_field = f"legacy_{channel}_mean_points"
+    v4_mean_field = f"v4_{channel}_mean_points"
+    rows = [
+        row for row in crosswalk
+        if row["mapping_confidence"] == confidence
+        and row["legacy_outcome"] == "success"
+        and row["v4_outcome"] == "success"
+        and row[legacy_mean_field] not in ("", None)
+        and row[v4_mean_field] not in ("", None)
+    ]
+    legacy_means = [float(row[legacy_mean_field]) for row in rows]
+    v4_means = [float(row[v4_mean_field]) for row in rows]
+    deltas = [
+        current - old
+        for old, current in zip(legacy_means, v4_means)
+    ]
+    return {
+        "mapping_set": confidence,
+        "channel": channel,
+        "paired_cells_with_channel": len(rows),
+        "legacy_mean_of_cell_means": mean_or_none(legacy_means),
+        "v4_mean_of_cell_means": mean_or_none(v4_means),
+        "mean_cell_delta_v4_minus_v3": mean_or_none(deltas),
+        "median_cell_delta_v4_minus_v3": median_or_none(deltas),
+        "v4_longer_cells": sum(delta > 0 for delta in deltas),
+        "equal_length_cells": sum(delta == 0 for delta in deltas),
+        "v4_shorter_cells": sum(delta < 0 for delta in deltas),
+    }
+
+
 def write_tsv(path: Path, rows: list[dict]) -> None:
     if not rows:
         raise ValueError(f"cannot write empty table: {path}")
@@ -471,9 +568,11 @@ def compare(
     batch_root: Path,
     classification_tsv: Path,
     output_dir: Path,
+    legacy_recovery_audit: Path | None = None,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=False)
     legacy = load_legacy_inventory(legacy_task_list)
+    apply_legacy_recovery_audit(legacy, legacy_recovery_audit)
     v4 = load_v4_inventory(classification_tsv)
     attach_points_to_legacy(legacy)
     attach_points_to_v4(v4, classification_tsv)
@@ -490,11 +589,23 @@ def compare(
         paired_summary(crosswalk, "exact_pixel_hash"),
         paired_summary(crosswalk, "same_identity_different_pixels"),
     ]
+    paired_channel_rows = [
+        paired_channel_summary(crosswalk, confidence, channel)
+        for confidence in (
+            "exact_pixel_hash",
+            "same_identity_different_pixels",
+        )
+        for channel in CHANNELS
+    ]
     write_tsv(output_dir / "legacy_v3_input_inventory.tsv", legacy)
     write_tsv(output_dir / "current_v4_input_inventory.tsv", v4)
     write_tsv(output_dir / "v3_v4_cell_crosswalk.tsv", crosswalk)
     write_tsv(output_dir / "cohort_summary.tsv", cohort_rows)
     write_tsv(output_dir / "paired_summary.tsv", paired_rows)
+    write_tsv(
+        output_dir / "paired_channel_summary.tsv",
+        paired_channel_rows,
+    )
     summary = {
         "legacy_entered": len(legacy),
         "v4_all_entered": len(v4_all),
@@ -506,6 +617,7 @@ def compare(
             )
         ),
         "paired": paired_rows,
+        "paired_channels": paired_channel_rows,
         "cohorts": cohort_rows,
         "primary_paired_set": "exact_pixel_hash",
         "sensitivity_paired_set": "same_identity_different_pixels",
@@ -540,6 +652,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--legacy-task-list", required=True, type=Path)
     parser.add_argument("--batch-root", required=True, type=Path)
     parser.add_argument("--v4-classification", required=True, type=Path)
+    parser.add_argument("--legacy-recovery-audit", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     return parser.parse_args()
 
@@ -551,6 +664,11 @@ def main() -> None:
         args.batch_root.resolve(),
         args.v4_classification.resolve(),
         args.output_dir.resolve(),
+        (
+            args.legacy_recovery_audit.resolve()
+            if args.legacy_recovery_audit
+            else None
+        ),
     )
     print((args.output_dir / "summary.txt").read_text(encoding="utf-8"))
     print(f"COMPARISON_OUTPUT={args.output_dir.resolve()}")

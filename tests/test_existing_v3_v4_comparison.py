@@ -117,8 +117,8 @@ class ExistingV3V4ComparisonTests(unittest.TestCase):
                         ["channel", "marker", "points"],
                         [
                             {"channel": "G", "marker": "Site2", "points": 9},
-                            {"channel": "P", "marker": "Site4", "points": 8},
-                            {"channel": "R", "marker": "Site3", "points": 7},
+                            {"channel": "P", "marker": "Site3", "points": 8},
+                            {"channel": "R", "marker": "Site4", "points": 7},
                         ],
                     )
 
@@ -189,6 +189,9 @@ class ExistingV3V4ComparisonTests(unittest.TestCase):
             self.assertEqual(crosswalk[1]["v4_raw_strict"], "False")
             self.assertTrue((output / "cohort_summary.tsv").is_file())
             self.assertTrue((output / "v3_v4_cell_crosswalk.tsv").is_file())
+            self.assertTrue(
+                (output / "paired_channel_summary.tsv").is_file()
+            )
 
 
 if __name__ == "__main__":
