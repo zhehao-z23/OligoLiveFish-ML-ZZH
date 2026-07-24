@@ -12,6 +12,8 @@
   sibling candidate archive, ensuring every candidate receives a full TIFF.
 - Add reproducible `strict`, `no_badqc`, `publicationlike`, and `all` policy
   views so one all-candidate SPT run can support later gate comparisons.
+- Add a checked-in policy comparison command that joins final per-cell SPT
+  status to those views and reports success and baseline-length statistics.
 - Keep the locked v4.1.6 filtered analysis output unchanged unless the new
   candidate archive option is explicitly requested.
 

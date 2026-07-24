@@ -210,6 +210,19 @@ ignores only `bad_qc`, `publicationlike` ignores `bad_qc` and `mask_border`,
 and `all` sends every archived candidate to `spt_included`. A non-blank
 `manual_decision` always takes precedence.
 
+After running SPT once for every archived candidate, join the resulting
+per-cell classification to all four policy views with:
+
+```powershell
+& $Python `
+  "$Repo\trajectory_extraction\pipeline\summarize_candidate_policy_spt.py" `
+  $BatchRoot $CellStatusTsv $NewOutputDirectory
+```
+
+The command writes a policy comparison, a machine-readable JSON copy, and a
+per-candidate status table without changing any crop, mask, trajectory, or
+selection manifest.
+
 ### Step 1 parameters
 
 | Parameter | Default/tutorial | Meaning |
